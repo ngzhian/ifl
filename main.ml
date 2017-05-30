@@ -86,25 +86,25 @@ type iseq =
   | INewline
 
 let space indent = String.make indent ' '
-let iNil : iseq = INil
-let iStr (s : string) : iseq = IStr s
-let iNum (i : int) : iseq = iStr (string_of_int i)
-let iFWNum width n : iseq =
+let i_nil : iseq = INil
+let i_str (s : string) : iseq = IStr s
+let i_num (i : int) : iseq = i_str (string_of_int i)
+let i_fwnum width n : iseq =
   let digits = string_of_int n in
-  iStr (space (width - String.length digits) ^ digits)
-let iAppend (seq1 : iseq) (seq2 : iseq) : iseq = IAppend (seq1, seq2)
+  i_str (space (width - String.length digits) ^ digits)
+let i_append (seq1 : iseq) (seq2 : iseq) : iseq = IAppend (seq1, seq2)
 (* newline followed by a number of spaces up to current indentation *)
-let iNewline : iseq = INewline
+let i_newline : iseq = INewline
 (* indents to line up with current column *)
-let iIndent (seq : iseq) : iseq = IIndent seq
-let iConcat (seqs : iseq list) : iseq =
-  List.fold_right (fun a b -> iAppend a b) seqs iNil
-let rec iInterleave (sep : iseq) (seqs : iseq list) : iseq = match seqs with
-  | [] -> iNil
+let i_indent (seq : iseq) : iseq = IIndent seq
+let i_concat (seqs : iseq list) : iseq =
+  List.fold_right (fun a b -> i_append a b) seqs i_nil
+let rec i_interleave (sep : iseq) (seqs : iseq list) : iseq = match seqs with
+  | [] -> i_nil
   | seq :: [] -> seq
-  | seq :: seqs -> iAppend (iAppend seq sep) (iInterleave sep seqs)
-(* not sure what to do for iLayn, not described *)
-let iLayn iseqs = iInterleave iNewline iseqs
+  | seq :: seqs -> i_append (i_append seq sep) (i_interleave sep seqs)
+(* not sure what to do for i_layn, not described *)
+let i_layn iseqs = i_interleave i_newline iseqs
 
 let rec flatten (col : int) (seqs : (iseq * int) list) : string = match seqs with
     | [] -> ""
@@ -114,77 +114,77 @@ let rec flatten (col : int) (seqs : (iseq * int) list) : string = match seqs wit
     | (INewline, indent) :: seqs -> "\n" ^ (space indent) ^ (flatten indent seqs)
     | (IIndent seq, indent) :: seqs -> flatten col ((seq, col) :: seqs)
 
-let iDisplay (seq : iseq) : string = flatten 0 [(seq, 0)]
+let i_display (seq : iseq) : string = flatten 0 [(seq, 0)]
 
 (* Pretty print expression using iseq *)
-let rec pprExpr (e : core_expr) : iseq = match e with
-    | EVar v -> iStr v
-    | ENum n -> iNum n
-    | EConstr (_, _) -> iStr "TODO constructor"
-    | EAp (e1, e2) -> iAppend (iAppend (pprExpr e1) (iStr " ")) (pprAExpr e2)
+let rec ppr_expr (e : core_expr) : iseq = match e with
+    | EVar v -> i_str v
+    | ENum n -> i_num n
+    | EConstr (_, _) -> i_str "TODO constructor"
+    | EAp (e1, e2) -> i_append (i_append (ppr_expr e1) (i_str " ")) (ppr_aexpr e2)
     | ELet (isrec, defns, expr) ->
       let keyword = if isrec then "letrec" else "let" in
-      iConcat [ iStr keyword; iNewline;
-                iStr "  "; iIndent (pprDefns defns); iNewline;
-                iStr "in "; pprExpr expr ]
+      i_concat [ i_str keyword; i_newline;
+                i_str "  "; i_indent (ppr_defns defns); i_newline;
+                i_str "in "; ppr_expr expr ]
     | ECase (e, alts) ->
-      iConcat [ iStr "case "; pprExpr e; iStr " of"; iNewline;
-                iIndent (pprAlts alts); iNewline
+      i_concat [ i_str "case "; ppr_expr e; i_str " of"; i_newline;
+                i_indent (ppr_alts alts); i_newline
               ]
     | ELam (vs, e) ->
-      iConcat [ iStr "\ "; pprVars vs; iStr " . "; pprExpr e ]
+      i_concat [ i_str "\ "; ppr_vars vs; i_str " . "; ppr_expr e ]
 
 (* Pretty print expression using iseq *)
-and pprAExpr (e : core_expr) : iseq =
+and ppr_aexpr (e : core_expr) : iseq =
   if is_atomic_expr e
-  then pprExpr e
-  else iAppend (iAppend (iStr "(") (pprExpr e)) (iStr ")")
+  then ppr_expr e
+  else i_append (i_append (i_str "(") (ppr_expr e)) (i_str ")")
 
 (* Pretty print definitions *)
-and pprDefns (defns : (name * name expr) list) =
-  let sep = iConcat [ iStr ";"; iNewline ] in
-  iInterleave sep (List.map pprDefn defns)
+and ppr_defns (defns : (name * name expr) list) =
+  let sep = i_concat [ i_str ";"; i_newline ] in
+  i_interleave sep (List.map ppr_defn defns)
 
 (* Pretty print a definition *)
-and pprDefn ((name : name), (expr : name expr)) =
-  iConcat [ iStr name; iStr " = "; iIndent (pprExpr expr)]
+and ppr_defn ((name : name), (expr : name expr)) =
+  i_concat [ i_str name; i_str " = "; i_indent (ppr_expr expr)]
 
-and pprAlts (alts: (name alter list)) : iseq =
-  let sep = iConcat [ iStr ";"; iNewline ] in
-  iInterleave sep (List.map pprAlt alts)
+and ppr_alts (alts: (name alter list)) : iseq =
+  let sep = i_concat [ i_str ";"; i_newline ] in
+  i_interleave sep (List.map ppr_alt alts)
 
-and pprAlt ((tag, vars, e) : name alter) : iseq =
-  iConcat [ iStr "<"; iStr (string_of_int tag); iStr "> ";
-            pprVars vars; iStr "-> "; pprExpr e;
+and ppr_alt ((tag, vars, e) : name alter) : iseq =
+  i_concat [ i_str "<"; i_str (string_of_int tag); i_str "> ";
+            ppr_vars vars; i_str "-> "; ppr_expr e;
           ]
 
-and pprVars (vars : name list) : iseq =
-  iInterleave (iStr " ") (List.map iStr vars)
+and ppr_vars (vars : name list) : iseq =
+  i_interleave (i_str " ") (List.map i_str vars)
 
 (* Pretty print program *)
-and pprProgram (prog : core_program) : iseq =
-  iInterleave iNewline (List.map pprSc prog)
+and ppr_program (prog : core_program) : iseq =
+  i_interleave i_newline (List.map ppr_sc prog)
 
-and pprSc ((name : name), (vars : name list), (expr : core_expr)) : iseq =
-  iConcat [ iStr name; iStr " "; pprVars vars; iStr " = "; pprExpr expr ]
+and ppr_sc ((name : name), (vars : name list), (expr : core_expr)) : iseq =
+  i_concat [ i_str name; i_str " "; ppr_vars vars; i_str " = "; ppr_expr expr ]
 
 (* Pretty print program *)
-let pprint prog = iDisplay (pprProgram prog)
+let pprint prog = i_display (ppr_program prog)
 
 (** Lexer *)
 
 type token = int * char list
 
-let isWhitespace c = c = ' ' || c = '\t' || c = '\n'
-let isDigit c = c >= '0' &&  c <= '9'
-let isAlpha c = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
-let isIdChar c = isAlpha c || isDigit c || c = '_'
-let rec takeWhile p (cs : char list) = match cs with
+let is_whitespace c = c = ' ' || c = '\t' || c = '\n'
+let is_digit c = c >= '0' &&  c <= '9'
+let is_alpha c = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+let is_idchar c = is_alpha c || is_digit c || c = '_'
+let rec take_while p (cs : char list) = match cs with
   | [] -> []
-  | c :: cs -> if p c then c :: takeWhile p cs else []
-let rec dropWhile p (cs : char list) = match cs with
+  | c :: cs -> if p c then c :: take_while p cs else []
+let rec drop_while p (cs : char list) = match cs with
   | [] -> []
-  | c :: cs' -> if p c then dropWhile p cs' else cs
+  | c :: cs' -> if p c then drop_while p cs' else cs
 let explode s =
   let rec exp i l =
     if i < 0 then l else exp (i - 1) (s.[i] :: l) in
@@ -194,27 +194,27 @@ let string_of_chars chars =
       List.iter (Buffer.add_char buf) chars;
         Buffer.contents buf
 
-let twoCharOps = [ "=="; "~="; ">="; "<="; "=>" ]
+let two_char_ops = [ "=="; "~="; ">="; "<="; "=>" ]
 
 let clex (input : string) : token list =
   let rec _clex (ln : int) (chars : char list) : token list =
     match chars with
     | [] -> []
     (* comments begin with || and extends till new line *)
-    | '|' :: '|' :: cs -> _clex ln (dropWhile (fun c -> c != '\n') cs)
+    | '|' :: '|' :: cs -> _clex ln (drop_while (fun c -> c != '\n') cs)
     (* special two char ops we want to lex as a token *)
-    | c :: c' :: cs when List.mem (string_of_chars [c; c']) twoCharOps ->
+    | c :: c' :: cs when List.mem (string_of_chars [c; c']) two_char_ops ->
       (ln, [c; c']) :: _clex ln cs
     (* special case new line to report line numbers accurately *)
     | '\n' :: cs -> _clex (ln + 1) cs
-    | c :: cs when isWhitespace c -> _clex ln cs
-    | c :: cs when isDigit c ->
-      let num_token = c :: takeWhile isDigit cs in
-      let rest_cs = dropWhile isDigit cs in
+    | c :: cs when is_whitespace c -> _clex ln cs
+    | c :: cs when is_digit c ->
+      let num_token = c :: take_while is_digit cs in
+      let rest_cs = drop_while is_digit cs in
       (ln, num_token) :: _clex ln rest_cs
-    | c :: cs when isAlpha c ->
-      let var_tok = c :: takeWhile isIdChar cs in
-      let rest_cs = dropWhile isIdChar cs in
+    | c :: cs when is_alpha c ->
+      let var_tok = c :: take_while is_idchar cs in
+      let rest_cs = drop_while is_idchar cs in
       (ln, var_tok) :: _clex ln rest_cs
     | c :: cs -> (ln, [c]) :: _clex ln cs
   in _clex 0 (explode input)
@@ -228,43 +228,43 @@ let clex (input : string) : token list =
  *      V       V              V    V           V               *)
 type 'a parser = token list -> ('a * token list) list
 
-let pSat (p : string -> bool) : string parser =
+let p_sat (p : string -> bool) : string parser =
   function
   | ((_, cs)::toks) when p (string_of_chars cs) -> [((string_of_chars cs), toks)]
   | (_::_) -> []
   | [] -> []
 
 (* Parsers a literal, string, by comparing the first token on the inpu with a string *)
-let pLit (s : string) : string parser =
-  pSat (fun x -> x = s)
-(* let pLit (s : string) : string parser = *)
+let p_lit (s : string) : string parser =
+  p_sat (fun x -> x = s)
+(* let p_lit (s : string) : string parser = *)
 (*   function *)
 (*   | ((_, cs)::toks) when string_of_chars cs = s -> [(s, toks)] *)
 (*   | (_::_) -> [] *)
 (*   | [] -> [] *)
 
 let keywords = ["let"; "letrec"; "case"; "in"; "of"; "Pack"]
-let pVar : string parser =
-  pSat (fun x -> isAlpha x.[0] && not (List.mem x keywords))
-(* let pVar : string parser = *)
+let p_var : string parser =
+  p_sat (fun x -> is_alpha x.[0] && not (List.mem x keywords))
+(* let p_var : string parser = *)
 (*   function *)
-(*   | ((_, c::cs)::toks) when isAlpha c -> [(string_of_chars (c :: cs), toks)] *)
+(*   | ((_, c::cs)::toks) when is_alpha c -> [(string_of_chars (c :: cs), toks)] *)
 (*   | ((_, _)::toks) -> [] *)
 (*   | [] -> [] *)
 
-let pApply (p : 'a parser) (f : 'a -> 'b) : 'b parser =
+let p_apply (p : 'a parser) (f : 'a -> 'b) : 'b parser =
   fun toks ->
     List.map (fun (x, toks) -> (f x, toks) ) (p toks)
 
-let pNum : int parser =
-  pApply
-  (pSat (fun x -> List.for_all isDigit (explode x)))
+let p_num : int parser =
+  p_apply
+  (p_sat (fun x -> List.for_all is_digit (explode x)))
   int_of_string
 
-let pAlt (p1 : 'a parser) (p2 : 'a parser) : 'a parser =
+let p_alt (p1 : 'a parser) (p2 : 'a parser) : 'a parser =
   fun tokens -> (p1 tokens) @ (p2 tokens)
 
-let pThen (combine : 'a -> 'b -> 'c) (p1 : 'a parser) (p2 : 'b parser) : 'c parser =
+let p_then (combine : 'a -> 'b -> 'c) (p1 : 'a parser) (p2 : 'b parser) : 'c parser =
   function
   | toks ->
     List.concat
@@ -279,7 +279,7 @@ let pThen (combine : 'a -> 'b -> 'c) (p1 : 'a parser) (p2 : 'b parser) : 'c pars
                (p2 toks1)))
          (p1 toks))
 
-let pThen3 (combine : 'a -> 'b -> 'c -> 'd)
+let p_then3 (combine : 'a -> 'b -> 'c -> 'd)
            (p1 : 'a parser) (p2 : 'b parser) (p3 : 'c parser) : 'd parser =
   function
   | toks ->
@@ -296,7 +296,7 @@ let pThen3 (combine : 'a -> 'b -> 'c -> 'd)
                  (p2 toks1)))
          (p1 toks))
 
-let pThen4 (combine : 'a -> 'b -> 'c -> 'd -> 'e)
+let p_then4 (combine : 'a -> 'b -> 'c -> 'd -> 'e)
            (p1 : 'a parser) (p2 : 'b parser) (p3 : 'c parser) (p4 : 'd parser) : 'e parser =
   function
   | toks ->
@@ -317,138 +317,139 @@ let pThen4 (combine : 'a -> 'b -> 'c -> 'd -> 'e)
                  (p2 toks1)))
          (p1 toks))
 
-let pEmpty (v : 'a) : 'a parser = fun toks -> [(v, toks)]
+let p_empty (v : 'a) : 'a parser = fun toks -> [(v, toks)]
 
 let cons hd tl = hd :: tl
 
 (* maybe can work on making this only return the greediest parse *)
-let rec pOneOrMore (p : 'a parser) : 'a list parser =
+let rec p_one_or_more (p : 'a parser) : 'a list parser =
   (* consumes tokens greedily, tries to parse as many as possible *)
   fun toks ->
-    let r = pThen cons p (fun toks -> pZeroOrMore p toks) toks in
+    let r = p_then cons p (fun toks -> p_zero_or_more p toks) toks in
     match r with
-    | [] -> pThen cons p (pEmpty []) toks
+    | [] -> p_then cons p (p_empty []) toks
     | _ -> r
 and oldpOneOrMore (p : 'a parser) : 'a list parser =
   (* this is an old implementation that leads to exponential increase in possible parses *)
-  pAlt
-  (* pThen cons p (pZeroOrMore p)
+  p_alt
+  (* p_then cons p (p_zero_or_more p)
    * doesn't work because of infinite recursion,
    * the key is to abstract it so that it's not eagerly evaluated
    * *)
-  (pThen cons p (fun toks -> pZeroOrMore p toks))
-  (pThen cons p (pEmpty []))
-and pZeroOrMore (p : 'a parser) : 'a list parser =
+  (p_then cons p (fun toks -> p_zero_or_more p toks))
+  (p_then cons p (p_empty []))
+and p_zero_or_more (p : 'a parser) : 'a list parser =
   (* greedy parsing, parses as many p as possible before returning empty *)
   fun toks ->
-    match pOneOrMore p toks with
-    | [] -> (pEmpty [] toks)
+    match p_one_or_more p toks with
+    | [] -> (p_empty [] toks)
     | r -> r
-  (* pAlt (pOneOrMore p) (pEmpty []) *)
+  (* p_alt (p_one_or_more p) (p_empty []) *)
 
-let rec pOneOrMoreWithSep (p1 : 'a parser) (p2 : 'b parser) : 'a list parser =
+let rec p_one_or_more_with_sep (p1 : 'a parser) (p2 : 'b parser) : 'a list parser =
   let add3 hd sep tl = hd :: tl in
-  pAlt
-    (pThen cons p1 (pEmpty []))
-    (pThen3 add3 p1 p2 (fun toks -> pOneOrMoreWithSep p1 p2 toks))
+  p_alt
+    (p_then cons p1 (p_empty []))
+    (p_then3 add3 p1 p2 (fun toks -> p_one_or_more_with_sep p1 p2 toks))
 
 type partial_expr = NoOp | FoundOp of name * core_expr
 
-let rec pExpr toks =
+let rec p_expr toks =
   List.fold_left
-    (fun a b -> pAlt a b)
-    pAExpr (* pEVar and pENum *)
+    (fun a b -> p_alt a b)
+    p_aexpr (* p_evar and p_enum *)
     [
-      pELet; pELetRec;
-      pECase;
-      pELam;
-      pExpr1
+      p_elet; p_eletrec;
+      p_ecase;
+      p_elam;
+      p_expr1;
+      p_pack;
     ]
   toks
-and pEVar =
-  pApply pVar (fun v -> EVar v)
-and pENum =
-  pApply pNum (fun n -> ENum n)
-and pELet toks =
-  let mk_let l defs _ e = ELet (false, defs, e) in
-  (pThen4 mk_let (pLit "let") pDefs (pLit "in") pExpr) toks
-and pELetRec toks =
-  let mk_let l defs _ e = ELet (true, defs, e) in
-  (pThen4 mk_let (pLit "letrec") pDefs (pLit "in") pExpr) toks
-and pDefs toks =
-  pOneOrMoreWithSep pDef (pLit ";") toks
-and pDef toks =
+and p_evar =
+  p_apply p_var (fun v -> EVar v)
+and p_enum =
+  p_apply p_num (fun n -> ENum n)
+and p_elet toks =
+  let mk_let l defs _ e = ELet (non_recursive, defs, e) in
+  (p_then4 mk_let (p_lit "let") p_defs (p_lit "in") p_expr) toks
+and p_eletrec toks =
+  let mk_let l defs _ e = ELet (recursive, defs, e) in
+  (p_then4 mk_let (p_lit "letrec") p_defs (p_lit "in") p_expr) toks
+and p_defs toks =
+  p_one_or_more_with_sep p_def (p_lit ";") toks
+and p_def toks =
   let mk_def v _ e = (v, e) in
-  pThen3 mk_def pVar (pLit "=") pExpr toks
-and pECase toks =
+  p_then3 mk_def p_var (p_lit "=") p_expr toks
+and p_ecase toks =
   let mk_case _ e _ alters = ECase (e, alters) in
-  pThen4 mk_case (pLit "case") pExpr (pLit "of") pAlters toks
-and pAlters toks =
-  pOneOrMoreWithSep pAlter (pLit ";") toks
-and pAlter toks =
+  p_then4 mk_case (p_lit "case") p_expr (p_lit "of") p_alters toks
+and p_alters toks =
+  p_one_or_more_with_sep p_alter (p_lit ";") toks
+and p_alter toks =
   let mk_alter tag vs _ e = (tag, vs, e) in
-  pThen4 mk_alter pTag (pZeroOrMore pVar) (pArrow) pExpr toks
-and pArrow toks =
-  pThen (fun _ _ -> ()) (pLit "-") (pLit ">") toks
-and pTag toks =
+  p_then4 mk_alter p_tag (p_zero_or_more p_var) (p_arrow) p_expr toks
+and p_arrow toks =
+  p_then (fun _ _ -> ()) (p_lit "-") (p_lit ">") toks
+and p_tag toks =
   let mk_tag _ tag _ = tag in
-  pThen3 mk_tag (pLit "<") pNum (pLit ">") toks
-and pPExpr toks = (* parenthesized expr *)
+  p_then3 mk_tag (p_lit "<") p_num (p_lit ">") toks
+and p_pexpr toks = (* parenthesized expr *)
   let mk_expr _ e _ = e in
-  pThen3 mk_expr (pLit "(") pExpr (pLit ")") toks
-and pPack toks =
+  p_then3 mk_expr (p_lit "(") p_expr (p_lit ")") toks
+and p_pack toks =
   let mk_pack_var tag _ arity = (tag, arity) in
-  let pPackVar toks = pThen3 mk_pack_var pNum (pLit ",") pNum toks in
+  let pPackVar toks = p_then3 mk_pack_var p_num (p_lit ",") p_num toks in
   let mk_pack _ _ (tag, arity) _ = EConstr (tag, arity) in
-  pThen4 mk_pack (pLit "Pack") (pLit "{") pPackVar (pLit "}") toks
-and pAExpr toks = (* atomic expressions *)
-  pAlt (pAlt pEVar pENum) pPExpr toks
-and pELam toks =
+  p_then4 mk_pack (p_lit "Pack") (p_lit "{") pPackVar (p_lit "}") toks
+and p_aexpr toks = (* atomic expressions *)
+  p_alt (p_alt p_evar p_enum) p_pexpr toks
+and p_elam toks =
   let mk_lam _ vs _ e = ELam (vs, e) in
-  pThen4 mk_lam (pLit "\\") (pOneOrMore pVar) (pLit ".") pExpr toks
-and pEAp toks =
+  p_then4 mk_lam (p_lit "\\") (p_one_or_more p_var) (p_lit ".") p_expr toks
+and p_eap toks =
   let mk_ap_chain (hd::tl) =
     List.fold_left (fun a b -> EAp (a, b)) hd tl in
-  pApply (pOneOrMore pAExpr) mk_ap_chain toks
+  p_apply (p_one_or_more p_aexpr) mk_ap_chain toks
 and found_op n e = FoundOp (n, e)
-and pExpr1 toks =
-  pThen assembleOp pExpr2 pExpr1c toks
-and pExpr1c toks =
-  pAlt (pThen found_op (pLit "|") pExpr1) (pEmpty NoOp) toks
-and pExpr2 toks =
-  pThen assembleOp pExpr3 pExpr2c toks
-and pExpr2c toks =
-  pAlt (pThen found_op (pLit "&") pExpr2) (pEmpty NoOp) toks
-and pExpr3 toks =
-  pThen assembleOp pExpr4 pExpr3c toks
-and pExpr3c toks =
-  pAlt (pThen found_op (pLit "|") pExpr3) (pEmpty NoOp) toks
-and pExpr4 toks =
-  pThen assembleOp pExpr5 pExpr4c toks
-and pExpr4c toks =
-  pAlt
-    (pAlt (pThen found_op (pLit "+") pExpr4) (pEmpty NoOp))
-    (pThen found_op (pLit "-") pExpr4)
+and p_expr1 toks =
+  p_then assemble_op p_expr2 p_expr1c toks
+and p_expr1c toks =
+  p_alt (p_then found_op (p_lit "|") p_expr1) (p_empty NoOp) toks
+and p_expr2 toks =
+  p_then assemble_op p_expr3 p_expr2c toks
+and p_expr2c toks =
+  p_alt (p_then found_op (p_lit "&") p_expr2) (p_empty NoOp) toks
+and p_expr3 toks =
+  p_then assemble_op p_expr4 p_expr3c toks
+and p_expr3c toks =
+  p_alt (p_then found_op (p_lit "|") p_expr3) (p_empty NoOp) toks
+and p_expr4 toks =
+  p_then assemble_op p_expr5 p_expr4c toks
+and p_expr4c toks =
+  p_alt
+    (p_alt (p_then found_op (p_lit "+") p_expr4) (p_empty NoOp))
+    (p_then found_op (p_lit "-") p_expr4)
     toks
-and pExpr5 toks =
-  pThen assembleOp pExpr6 pExpr5c toks
-and pExpr5c toks =
-  pAlt
-    (pAlt (pThen found_op (pLit "*") pExpr5) (pEmpty NoOp))
-    (pThen found_op (pLit "/") pExpr5)
+and p_expr5 toks =
+  p_then assemble_op p_expr6 p_expr5c toks
+and p_expr5c toks =
+  p_alt
+    (p_alt (p_then found_op (p_lit "*") p_expr5) (p_empty NoOp))
+    (p_then found_op (p_lit "/") p_expr5)
     toks
-and pExpr6 toks =
-  pEAp toks
-and assembleOp e1 = function
+and p_expr6 toks =
+  p_eap toks
+and assemble_op e1 = function
   | NoOp             -> e1
   | FoundOp (op, e2) -> EAp (EAp (EVar op, e1), e2)
 
-let pSc : core_sc_defn parser =
+let p_sc : core_sc_defn parser =
   let mk_sc v vs _ e = (v, vs, e) in
-  pThen4 mk_sc pVar (pZeroOrMore pVar) (pLit "=") pExpr
+  p_then4 mk_sc p_var (p_zero_or_more p_var) (p_lit "=") p_expr
 
-let pProgram : core_program parser =
-  pOneOrMoreWithSep pSc (pLit ";")
+let p_program : core_program parser =
+  p_one_or_more_with_sep p_sc (p_lit ";")
 
 let syntax (tokens : token list) : core_program =
   let rec take_first_parse = function
@@ -456,7 +457,7 @@ let syntax (tokens : token list) : core_program =
     | parse :: others -> take_first_parse others
     | _ -> failwith "Syntax error"
   in
-  take_first_parse (pProgram tokens)
+  take_first_parse (p_program tokens)
 
 let load_file f =
   let ic = open_in f in
@@ -619,39 +620,37 @@ let last ls = List.nth ls (List.length ls - 1)
 (* Facilities for printing the stack *)
 let show_state (stack, _, heap, _, _) =
   let show_fw_addr addr =
-    let str = string_of_int addr in
-    let n = String.length str in
-    iStr (space (4 - n) ^ str) in
-  let show_addr addr = iNum addr in
+    i_fwnum 4 addr in
+  let show_addr addr = i_num addr in
   let show_node node = match node with
-    | NAp (a1, a2) -> iConcat [ iStr "NAp "; show_addr a1;
-                                iStr " "; show_addr a2 ]
-    | NSupercomb (name, args, body) -> iStr ("NSupercomb " ^ name)
-    | NNum n -> iAppend (iStr "NNum ") (iNum n) in
+    | NAp (a1, a2) -> i_concat [ i_str "NAp "; show_addr a1;
+                                i_str " "; show_addr a2 ]
+    | NSupercomb (name, args, body) -> i_str ("NSupercomb " ^ name)
+    | NNum n -> i_append (i_str "NNum ") (i_num n) in
   let show_stack_node heap node = match node with
-    | NAp (faddr, argaddr) -> iConcat [ iStr "NAp "; show_fw_addr faddr;
-                                        iStr " "; show_fw_addr argaddr; iStr " (";
+    | NAp (faddr, argaddr) -> i_concat [ i_str "NAp "; show_fw_addr faddr;
+                                        i_str " "; show_fw_addr argaddr; i_str " (";
                                         show_node (ti_heap_lookup heap argaddr);
-                                        iStr ")" ]
+                                        i_str ")" ]
     | node -> show_node node in
-  let show_stack_item addr = iConcat [ show_fw_addr addr; iStr ": ";
+  let show_stack_item addr = i_concat [ show_fw_addr addr; i_str ": ";
                                        show_stack_node heap (ti_heap_lookup heap addr)] in
   let show_stack heap stack =
-    iConcat [ iStr "Stk [";
-              iIndent (iInterleave iNewline (List.map show_stack_item stack));
-              iStr "]" ] in
-  iConcat [ show_stack heap stack; iNewline ]
+    i_concat [ i_str "Stk [";
+              i_indent (i_interleave i_newline (List.map show_stack_item stack));
+              i_str "]" ] in
+  i_concat [ show_stack heap stack; i_newline ]
 let showStats (_, _, _, _, stats) =
-  iConcat [ iNewline; iNewline; iStr "Total number of steps = ";
-            iNum (ti_stat_get stats) ]
+  i_concat [ i_newline; i_newline; i_str "Total number of steps = ";
+            i_num (ti_stat_get stats) ]
 let show_results (states : ti_state list) : string =
-  iDisplay (iConcat [ iLayn (List.map show_state states);
+  i_display (i_concat [ i_layn (List.map show_state states);
                       showStats (last states)
                     ])
 
-let runProgS s =
+let run_prog_string s =
   s |> parse_string |> compile |> eval |> show_results
-let runProg filename =
+let run_prog filename =
   filename |> parse |> compile |> eval |> show_results
 
 (* some sample programs *)
