@@ -226,3 +226,157 @@ Where `empty` is the empty string.
 We need the type of the parser result to match up, but `expr1c` is not the correct type.
 So define a new data type to encapsulate this partial expression
 and assemble it with `expr2` in the production of `expr1`.
+
+## Template instantiation
+
+Graph reducer based on *template instantiation*
+
+### Reducible expressions
+
+A program is run by evaluating an expression,
+an expression is represented as a graph,
+and evaluation is done by *reductions*.
+
+Reduction happens on a *reducible expression*, redex.
+
+When there are no more redexes, the expression is in normal form.
+
+When there are more than one redex, choosing any order or reducing them
+will get us to normal form. However some reduction sequences fail to terminate.
+
+### Normal order reduction
+
+If there are terminating reduction sequences that terminates,
+the *normal order reduction*, choosing the outermost redex,
+will be one of them.
+
+By convention, the first expression to be evaluated is the supercombinator named `main`.
+
+`main` has no arguments and thus is a redex, it reduces to its body.
+
+When reducing function application, the root of the redex is replaced with
+the body of the function, substituting a pointer to the argument
+for each formal parameter.
+
+### Reduction steps
+
+Graph reduction consists of repeating 3 steps until a normal form is reached:
+
+1. Find the next redex
+2. Reduce the redex
+3. Update the root of the redex with result
+
+There are two sorts of redexes:
+
+1. Supercombinator, it is a redex, reduce it
+2. Built in primitives, if the arguments are evaluated, it is a redex, reduce it;
+otherwise it is not a redex, so evaluate the arguments first
+
+### Spine unwinding to find function application
+
+To find the next reduction, we can first find the outermost function application
+(which might not be reducible).
+
+Start from the root and follow the left branch of application nodes until
+a supercombinator or built-in primitive is reached.
+A stack is used to remember the address of the nodes going down.
+This left-branching chain is called the *spine* of the expression.
+
+Then, check how many arguments the function takes, and move up the graph
+that number of nodes: the current node is now the root of the outermost
+function application.
+
+If the result of an evaluation is a partial application,
+e.g. a function of 3 arguments applied to only 2,
+this expression is said to reach *weak head normal form*, WHNF.
+The subexpressions might contain redexes.
+If the program has been appropriately typechecked, this will not happen.
+
+Check if this function application is a redex.
+If it is a supercombinator, it is. If it is a primitive, like `*`,
+it depends on whether the arguments are evaluated.
+If they are, this is a redex, otherwise we need to evaluate the arguments.
+
+This can be done using the same reduction steps with a new stack.
+However the old stack needs to be put away for later,
+so we end up storing this stack of stacks in a *dump*.
+
+### Reducing a supercombinator redex
+
+A supercombinator redex is reduced by replacing the redex with an instance of the
+supercombinator body,
+and substituting the occurrence of formal parameters
+with pointers to the actual arguments:
+the arguments are shared, not copied.
+
+### Updating a redex
+
+After reduction, the root of the redex needs to be updated,
+so that the reduction is only done once if the redex is shared.
+
+This updating is the essence of *lazy evaluation*:
+a redex will only be evaluated, if at all, once.
+
+An *indirection node* is used to update the root of a redex
+to point to the result of the reduction.
+
+### State transition systems
+
+Graph reductions can be implemented using state transition systems.
+
+State transition systems describe the behavior of a sequential machine.
+At any time, the machine is in some *state*, starting from an *initial state*.
+If the machine's state matches one of the *state transition rules*,
+the rule fires and specifies a new state for the machine to transition into.
+If no rules match, execution stops.
+If more than one rule matches, one is chosen arbitrarily,
+and the system is called *non-deterministic*.
+
+### Mark 1
+
+The state of the template instantiation graph reduction machine is a quadruple
+`(stack, dump, heap, globals)`, or `(s, d, h, f)`
+
+The *stack* is a stack of *addresses*, identifying nodes in the heap.
+The nodes form the spine of the expression being evaluated.
+
+The *dump* records the state of the spine stack prior to evaluation of an argument
+of a strict primitive.
+
+The *heap* is a collection of tagged *nodes*
+
+For each supercombinator, *globals* gives the address of heap node representing itself.
+
+A heap node can be one of three forms:
+
+1. `NAp a1 a2` represents application of node at address `a1` to node at address `a2`
+2. `NSupercomb args body` represents supercombinator
+3. `NNum n` represents the number `n`
+
+There are two state transition rules for this machine.
+
+Rule 1 describes spine unwinding:
+
+```
+          a :: s, d, h[a : NAp a1 a2], f
+=>  a1 :: a :: s, d, h[a : NAp a1 a2], f
+```
+
+It unwinds the entire spine of the expression onto the stack,
+until the top node is no longer a `NAp` node.
+
+Rule 2 describes supercombinator reduction:
+
+```
+    a0 :: a1 :: ... :: an :: s, d, h[a0 : NSupercomb [x1; ...; xn] body], f
+=>                     ar :: s, d, h'                                   , f
+where (h', ar) = instantiate body h f[x1 -> a1; ...; xn -> an]
+```
+
+`instantiate` takes an expression, `body`, a heap,
+and a global mapping of names to heap addresses, augmented (adding)
+the mapping of argument names to their addresses obtained from the stack.
+
+`instantiate` returns a new heap and the address of the newly constructed instance.
+The root of the redex is not updated by this rule.
+
