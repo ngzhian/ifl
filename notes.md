@@ -456,4 +456,52 @@ a heap on which newly allocated nodes will go,
 an environment, where address supercombinator and arguments can be found using names,
 and will return the new updated heap, and address of allocated instance.
 
+Handling `let` expressions is similar to handling supercombinators:
+1. the rhs of the definitions need to be instantiated,
+2. then the environment should be updated with the mappings
+of definition names to the instances,
+3. instantiate the body of the `let` expression with this augmented environment.
 
+
+### `let` and `letrec` expressions
+
+`letrec` is a bit more tricky, the instantiation in step 1 needs to use
+the augmented environment in step 2.
+In a lazy language this can be done in a straightforward manner,
+but in a strict language I had to allocate dummy nodes in step 1,
+so as to get the variables in the environment,
+and in step 2 I had to copy the instance to the address that was allocated
+for the name in step 1.
+
+### Updating redex
+
+To prevent doing repeated computations, we can update the root of the redex
+with an indirection node pointing to the result:
+
+```
+    a0 :: a1 :: ... :: an :: s, d, h [a0 : NSupercomb [x1; ...; xn] body], f
+=>                     ar :: s, d, h'[an : NInd ar ]                     , f
+where (h', ar) = instantiate body h f[x1 -> a1; ...; xn -> an]
+```
+
+The difference here is that `h'` is updated by overwriting `an` with
+an indirection to `ar`, the root of the result of instantiation.
+
+If the supercombinator is a CAF, no arguments, then the node to be modified is the
+supercombinator node itself.
+
+One more rule is needed to handle indirections:
+
+```
+    a  :: s, d, h[a : NInd a1], f
+=>  a1 :: s, d, h             , f
+```
+
+The address of the indirection is removed from the stack, replaced with the node
+that is indirected to.
+
+```
+twice f = f f
+main = twice id 3
+       id id 3
+```
