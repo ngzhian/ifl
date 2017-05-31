@@ -635,6 +635,51 @@ and instantiate_letrec defs body heap env =
   let (heap', env') = map_accuml alloc heap' defs in
   instantiate body heap' (env' @ env)
 
+and instantiate_and_update (expr : core_expr) upd_addr heap env : ti_heap = match expr with
+    | EAp (e1, e2) -> let (heap1, a1) = instantiate e1 heap env in
+                      let (heap2, a2) = instantiate e2 heap1 env in
+                      ti_heap_update heap2 upd_addr (NAp (a1, a2))
+    | ENum n -> ti_heap_update heap upd_addr (NNum n)
+
+    | EVar v -> ti_heap_update heap upd_addr (NInd (List.assoc v env))
+
+    | EConstr (tag, arity) ->
+      fst @@ instantiate_constr tag arity heap env
+
+    | ELet (isrec, defs, body) ->
+      if isrec
+      then instantiate_letrec_and_update defs body upd_addr heap env
+      else instantiate_let_and_update defs body upd_addr heap env
+
+    | ECase _ -> failwith "cant handle case expr"
+
+    | _ -> failwith "dont know how to instantiate"
+and instantiate_let_and_update defs body upd_addr heap env : ti_heap =
+  (* allocate a def in let *)
+  let alloc heap (name, rhs) =
+    let (h, addr) = instantiate rhs heap env in
+    (h, (name, addr)) in
+  let (heap', env') = map_accuml alloc heap defs in
+  instantiate_and_update body upd_addr heap' (env' @ env)
+and instantiate_letrec_and_update defs body upd_addr heap env =
+  (* there's probably a better way to do this instead of allocating and copying *)
+  (* first allocate all the rhs with dummy values*)
+  let dummy = ENum 0 in
+  let alloc_dummy heap name =
+    let (h, addr) = instantiate dummy heap env in (h, (name, addr)) in
+  (* we get a heap' and env' with dummy valus *)
+  let (heap', env') = map_accuml alloc_dummy heap (binders_of defs) in
+  (* allocate a def in let *)
+  let alloc heap (name, rhs) =
+    (* we augment the env with dummy env' to allow for letrec rhs *)
+    let upd_addr = List.assoc name env' in
+    let h = instantiate_and_update rhs upd_addr heap (env' @ env) in
+    (h, (name, upd_addr)) in
+  (* really allocate defs with real rhs *)
+  let (heap', env') = map_accuml alloc heap' defs in
+  instantiate_and_update body upd_addr heap' (env' @ env)
+
+
 (* get the last element of ls *)
 let last ls = List.nth ls (List.length ls - 1)
 
@@ -679,25 +724,23 @@ let sc_step (stack, dump, heap, globals, stats) sc args body =
   let rec get_arg addr = match ti_heap_lookup heap addr with
     | NAp (f, arg) -> arg
     | _ -> failwith "error getargs" in
-  let getargs heap (sc::stack) = List.map get_arg stack in
   (* bind arg names to addresses *)
-  let stack_args = getargs heap stack in
+  let stack_args = List.map get_arg (List.tl stack) in
   (* check that supercombinator is not underapplied, error out otherwise *)
   check_under_application sc args stack_args;
   (* zip2 will take care when length of args and stack args don't match *)
   let arg_bindings = zip2 args stack_args in
   let env = arg_bindings @ globals in
-  (* instantiate body *)
-  let (heap', a_r) = instantiate body heap env in
-  (* discard argument from stack, push result on stack *)
-  (* + 1 to pop the sc node from stack *)
+  (* discard arguments and sc from stack *)
   let (dropped, remaining) = take (List.length args + 1) stack in
-  let stack' = a_r :: remaining in
+  let redex_root = last dropped in
+  (* often the redex_root is updated to an NInd to point to new instance *)
+  (* rather than the NInd, we can directly update redex_root, saving heap allocs *)
+  let (heap') = instantiate_and_update body redex_root heap env in
+  let stack' = redex_root :: remaining in
   let is_primitive = List.mem sc prelude_names in
   let count_reduction = if is_primitive then ti_stat_p_r else ti_stat_s_r in
   (* update root of redex with indirection to result *)
-  let redex_root = last dropped in
-  let heap' = ti_heap_update heap' redex_root (NInd a_r) in
   (stack', dump, heap', globals, count_reduction stats)
 
 (* step to the next state *)
