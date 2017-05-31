@@ -343,14 +343,15 @@ The nodes form the spine of the expression being evaluated.
 The *dump* records the state of the spine stack prior to evaluation of an argument
 of a strict primitive.
 
-The *heap* is a collection of tagged *nodes*
+The *heap* is a collection of tagged *nodes*.
+You can retrieve a node in the heap using an address.
 
 For each supercombinator, *globals* gives the address of heap node representing itself.
 
 A heap node can be one of three forms:
 
 1. `NAp a1 a2` represents application of node at address `a1` to node at address `a2`
-2. `NSupercomb args body` represents supercombinator
+2. `NSupercomb args body` represents supercombinator with arguments `args` and body `body`
 3. `NNum n` represents the number `n`
 
 There are two state transition rules for this machine.
@@ -362,7 +363,10 @@ Rule 1 describes spine unwinding:
 =>  a1 :: a :: s, d, h[a : NAp a1 a2], f
 ```
 
-It unwinds the entire spine of the expression onto the stack,
+If the current address on the stack points to a `NAp` node in the heap,
+we need to put the `a1` onto the stack first.
+This is equivalent to evaluating the function before applying it to its arguments.
+Effectively, this rule unwinds the entire spine of the expression onto the stack,
 until the top node is no longer a `NAp` node.
 
 Rule 2 describes supercombinator reduction:
@@ -373,10 +377,83 @@ Rule 2 describes supercombinator reduction:
 where (h', ar) = instantiate body h f[x1 -> a1; ...; xn -> an]
 ```
 
+If the current address on the stack points to a `NSupercomb` node in the heap,
+we update the stack and the heap in this manner:
+we pop the stack once to remove the address of the current supercombinator,
+and we pop as many items off the stack as there are arguments to the supercombinator,
+then we push the result of instantiating the body of the supercombinator,
+which is an expression in our core language,
+onto the stack,
+this result is the address that points to the newly constructed node;
+initializing the body of the supercombinator may cause the heap to change,
+such as allocating a new number,
+so the old heap is updated to this new one.
+
 `instantiate` takes an expression, `body`, a heap,
 and a global mapping of names to heap addresses, augmented (adding)
-the mapping of argument names to their addresses obtained from the stack.
+the mapping of argument names to their addresses obtained from the stack,
+i.e. with the formal arguments bound to values popped off the stack.
 
 `instantiate` returns a new heap and the address of the newly constructed instance.
 The root of the redex is not updated by this rule.
+
+To run a program, we parse the source into our Core AST,
+compile it into a machine state,
+evaluate the state stepwise,
+and finally print the results and statistics.
+
+#### Compiler
+
+The compiler builds an initial machine state from a Core program.
+
+All the supercombinator definitions in the program and prelude
+needs to be available on the heap, and accessible by name
+via globals.
+We have to walk through all the definitions,
+and allocate each definition on the heap.
+With each allocation, we get back the address of the allocated node,
+and a new heap containing this allocation.
+This new heap then has to be passed to the next allocation,
+and the address has to added to the globals, and
+the globals need to be passed to the next allocation as well.
+At the end of these allocations,
+we will have a heap with all the definitions allocated,
+and a globals containing all the definitions.
+
+The initial stack contains just the address of `main`,
+which is the designated entry point.
+
+#### Evaluator
+
+The evaluator starts from an initial machine step,
+and runs the machine one step at a time,
+remembering all the states it has gone through.
+
+The evaluator runs until it reaches a final state,
+which happens when the stack contains a single object that is a data node.
+A data node is a number or constructor.
+
+At each step, the evaluator looks at the top of the stack,
+find out what node, there are three types, it points to,
+and performs appropriate action:
+
+1. number node, it's an error, because a number cannot
+be applied, if the number node was the only thing on the stack
+evaluation would not have occurred at all.
+2. application node, perform stack unwinding by pushing the function
+to be applied onto the stack (rule 1)
+3. supercombinator node, bind argument names to argument addresses on the stack,
+instantiate the body of the supercombinator with an environment
+containing arguments and globals,
+pop arguments and supercombinator node off the stack,
+push the result address of instantiating the body onto the stack,
+and update the heap with the result of instantiating the body (rule 2).
+
+The goal of the instantiation is to create a new node that represents
+the body of the supercombinator.
+To instantiate the body, it needs the body expression,
+a heap on which newly allocated nodes will go,
+an environment, where address supercombinator and arguments can be found using names,
+and will return the new updated heap, and address of allocated instance.
+
 

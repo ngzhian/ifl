@@ -32,6 +32,8 @@ and core_program = name program
 and 'a sc_defn = name * 'a list * 'a expr (* name, arguments, body *)
 and core_sc_defn = name sc_defn
 
+let main_entry = "main" (* entry point of program is a supercombinator called main *)
+
 (** Helper methods *)
 
 (* Gets the list of names (lhs) of a list of definitions *)
@@ -105,6 +107,7 @@ let rec i_interleave (sep : iseq) (seqs : iseq list) : iseq = match seqs with
   | seq :: seqs -> i_append (i_append seq sep) (i_interleave sep seqs)
 (* not sure what to do for i_layn, not described *)
 let i_layn iseqs = i_interleave i_newline iseqs
+let i_line_btwn f xs = i_interleave i_newline (List.map f xs)
 
 let rec flatten (col : int) (seqs : (iseq * int) list) : string = match seqs with
     | [] -> ""
@@ -503,6 +506,15 @@ let ti_heap_alloc (heap : ti_heap) (node : node) =
   (heap @ [node], List.length heap)
 let ti_heap_lookup (heap : ti_heap) (addr : addr) =
   List.nth heap addr
+let ti_heap_size heap =
+  List.length heap
+(* get all addresses on heap *)
+let ti_heap_addrs (heap : ti_heap) : addr list =
+  (* since heap is a list, we want to return a list of addr from 0 to length -1 *)
+  let rec list_up_to acc = function
+    | 0 -> acc
+    | n -> list_up_to (n - 1 :: acc) (n - 1) in
+  list_up_to [] (ti_heap_size heap)
 
 let ti_dump_init = Dummy
 
@@ -514,28 +526,36 @@ let apply_to_stats fn (s, d, h, f, stats) =
 
 (* Maps a list by calling f on the acc and elements of the list
  * returning the final acc and the input list transformed by f *)
-let rec mapAccuml f acc xs =
-  let rec go acc xs ys = match xs with
-    | [] -> acc, ys
-    | x::xs -> let (acc', y) = f acc x in go acc' xs (y::ys) in
-  let (acc, ys) = go acc xs [] in
-  (acc, List.rev ys)
+let rec map_accuml f acc xs = match xs with
+  | []      -> (acc, [])
+  | x :: xs -> let (acc1, y) = f acc x in
+               let (acc2, ys) = map_accuml f acc1 xs in
+               (acc2, y :: ys)
+  (* possibly a faster impl *)
+  (* let rec go acc xs ys = match xs with *)
+  (*   | [] -> acc, ys *)
+  (*   | x::xs -> let (acc', y) = f acc x in go acc' xs (y::ys) in *)
+  (* let (acc, ys) = go acc xs [] in *)
+  (* (acc, List.rev ys) *)
 
 (* Allocates a supercombinator definition on the heap *)
 let allocate_sc heap (name, args, body) =
-  let (heap', addr) = ti_heap_alloc heap (NSupercomb (name, args, body)) in
+  let sc = NSupercomb (name, args, body) in
+  let (heap', addr) = ti_heap_alloc heap sc in
   (heap', (name, addr))
-
-(* Build initial heap from definitions *)
-let build_initial_heap defs = mapAccuml allocate_sc ti_heap_initial defs
 
 (* Compile Core program *)
 let compile (p : core_program) : ti_state =
   (* gather up all supercombinator defs and prelude *)
   let sc_defs = p @ prelude_defs @ extra_prelude_defs in
-  (* build initial heap mapping addresses to nodes *)
+  (* build initial heap from definitions *)
+  let build_initial_heap = map_accuml allocate_sc ti_heap_initial in
+  (* initial heap contains program and prelude sc nodes *)
+  (* globals contains names to address mapping *)
   let (heap, globals) = build_initial_heap sc_defs in
-  let main = List.assoc "main" globals in
+  (* find the address of main entry point *)
+  let main = List.assoc main_entry globals in
+  (* begin the machine with the main entry point on stack *)
   let stack = [main] in
   (stack, ti_dump_init, heap, globals, ti_stat_init)
 
@@ -572,40 +592,52 @@ let rec drop n ls = match n with
   | 0 -> ls
   | n -> drop (n - 1) (List.tl ls)
 
+(* a number should never be applied as a function *)
 let num_step state n = failwith "Number applied as function"
+
 (* unwind rule *)
 let ap_step (stack, dump, heap, globals, stats) a1 a2 =
   (a1 :: stack, dump, heap, globals, stats)
+
 let sc_step (stack, dump, heap, globals, stats) sc args body =
-  (* get address of all args on the stack *)
+  (* get address of all args on the stack, e.g.
+   *       (NAp1)
+   *       /    \
+   *    (NAp2)  (a2)
+   *     /  \
+   * (NSc)  (a1)
+   *
+   * NSc takes two arguments, name x and y.
+   * The stack contains [NSc; NAp2; NAp1],
+   * x needs to be bound to a1, y to a2.
+   **)
   let getargs heap (sc::stack) =
     List.map (fun addr -> match ti_heap_lookup heap addr with
         | NAp (f, arg) -> arg
         | _ -> failwith "error getargs")
         stack in
   (* bind arg names to addresses *)
+  (* TODO when lengths don't match , e.g. I I 3 will try to combine [x] with [I; 3] *)
   let arg_bindings = List.combine args (getargs heap stack) in
   let env = arg_bindings @ globals in
   (* instantiate body *)
   let (heap', result_addr) = instantiate body heap env in
   (* discard argument from stack, push result on stack *)
-  let _ = print_endline ("pushing result addr: " ^ (string_of_int result_addr)) in
   (* + 1 to drop the sc node from stack *)
   let stack' = result_addr :: (drop (List.length args + 1) stack) in
   (stack', dump, heap', globals, stats)
 
-let dispatch state (n : node) = match n with
-  | NAp (a1, a2) -> ap_step state a1 a2
-  | NSupercomb (sc, args, body) -> sc_step state sc args body
-  | NNum n -> num_step state n
-
+(* step to the next state *)
 let step (state : ti_state) =
-  let (stack, dump, heap, globals, stats) = state in
-  (dispatch state (ti_heap_lookup heap (List.hd stack)))
-  |> apply_to_stats ti_stat_inc
+  let (stack, _, heap, _, _) = state in
+  (* get node pointed to by addr at top of stack *)
+  match ti_heap_lookup heap (List.hd stack) with
+    | NAp (a1, a2) -> ap_step state a1 a2
+    | NSupercomb (sc, args, body) -> sc_step state sc args body
+    | NNum n -> num_step state n
 
-(* maybe do some admin on state *)
-let doAdmin x = x
+(* do some admin on state on each step *)
+let doAdmin state = apply_to_stats ti_stat_inc state
 
 let rec eval (state : ti_state) : ti_state list =
   let rest_states =
@@ -615,53 +647,57 @@ let rec eval (state : ti_state) : ti_state list =
   in
   state :: rest_states
 
-let last ls = List.nth ls (List.length ls - 1)
+(** Facilities for printing the stack *)
 
-(* Facilities for printing the stack *)
+(* shows the state of the stack *)
 let show_state (stack, _, heap, _, _) =
+  (* add a title to a section *)
+  let wrap title body = i_concat [ i_str (title ^ "["); i_newline; i_indent body; i_str "]" ] in
+  (* show addr in fix width format of 4 *)
   let show_fw_addr addr =
     i_fwnum 4 addr in
+  (* show addres *)
   let show_addr addr = i_num addr in
+  (* show a node concisely *)
   let show_node node = match node with
     | NAp (a1, a2) -> i_concat [ i_str "NAp "; show_addr a1;
                                 i_str " "; show_addr a2 ]
     | NSupercomb (name, args, body) -> i_str ("NSupercomb " ^ name)
     | NNum n -> i_append (i_str "NNum ") (i_num n) in
+  (* show a node, if it's an application we show the argument *)
   let show_stack_node heap node = match node with
-    | NAp (faddr, argaddr) -> i_concat [ i_str "NAp "; show_fw_addr faddr;
-                                        i_str " "; show_fw_addr argaddr; i_str " (";
-                                        show_node (ti_heap_lookup heap argaddr);
-                                        i_str ")" ]
+    | NAp (faddr, argaddr) -> i_concat [ i_str "NAp "; show_fw_addr faddr; i_str " ";
+                                         show_fw_addr argaddr;
+                                         i_str " (";
+                                         show_node (ti_heap_lookup heap argaddr);
+                                         i_str ")" ]
     | node -> show_node node in
-  let show_stack_item addr = i_concat [ show_fw_addr addr; i_str ": ";
+  (* show a node and its address *)
+  let show_addr_node addr = i_concat [ show_fw_addr addr; i_str ": ";
                                        show_stack_node heap (ti_heap_lookup heap addr)] in
-  let show_stack heap stack =
-    i_concat [ i_str "Stk [";
-              i_indent (i_interleave i_newline (List.map show_stack_item stack));
-              i_str "]" ] in
-  i_concat [ show_stack heap stack; i_newline ]
-let showStats (_, _, _, _, stats) =
-  i_concat [ i_newline; i_newline; i_str "Total number of steps = ";
-            i_num (ti_stat_get stats) ]
-let show_results (states : ti_state list) : string =
-  i_display (i_concat [ i_layn (List.map show_state states);
-                      showStats (last states)
-                    ])
+  (* show the stack *)
+  let show_stack = wrap "Stk" (i_line_btwn show_addr_node stack) in
+  (* show the heap *)
+  let show_heap = wrap "Heap" (i_line_btwn show_addr_node (ti_heap_addrs heap)) in
+  i_concat [ show_stack; i_newline; show_heap; i_newline ]
 
+(* show stats from running machine *)
+let show_stats (_, _, _, _, stats) =
+  i_concat [ i_newline; i_newline;
+             i_str "Total number of steps = ";
+             i_num (ti_stat_get stats) ]
+
+(* show results from running machine *)
+let show_results (states : ti_state list) : string =
+  let last ls = List.nth ls (List.length ls - 1) in
+  let ss = List.map show_state states in
+  let stats = show_stats (last states) in
+  i_display (i_concat [ i_layn ss; stats ])
+
+(* run a Core program in string form *)
 let run_prog_string s =
   s |> parse_string |> compile |> eval |> show_results
+
+(* run a Core program in a file *)
 let run_prog filename =
   filename |> parse |> compile |> eval |> show_results
-
-(* some sample programs *)
-let quad = ("quad",  ["x"],
-     ELet (false,
-           ["twice", EAp (EAp (EVar "+", EVar "x"), EVar "x")],
-           EAp (EAp (EVar "+", EVar "twice"), EVar "twice")))
-let eg1 : core_program =
-  [ ("I",  ["x"], EVar "x");
-    ("K",  ["x"; "y"], EVar "x");
-    quad
-  ]
-
-let _ = print_endline (pprint eg1)
