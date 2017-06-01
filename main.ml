@@ -486,7 +486,7 @@ and addr = int
 (* Stack of addresses being worked on, our spine *)
 and ti_stack = addr list
 (* Dump of stacks when working on arguments *)
-and ti_dump = Dummy
+and ti_dump = ti_stack list
 (* Heap to store nodes of our graph *)
 and ti_heap = node list
             * int       (* heap allocs *)
@@ -496,6 +496,8 @@ and node =
   | NSupercomb of name * (name list) * core_expr (* supercombinator *)
   | NNum of int
   | NInd of addr                                 (* indirection *)
+  | NPrim of name * primitive                    (* primitive *)
+and primitive = Neg | Add | Sub | Mul | Div
 (* Mapping of names (supercombinators) to addresses in heap *)
 and ti_globals = (name * addr) list
 (* Stats for execution of the machine *)
@@ -528,7 +530,7 @@ let ti_heap_addrs ((heap, n_alloc) : ti_heap) : addr list =
     | n -> list_up_to (n - 1 :: acc) (n - 1) in
   list_up_to [] (ti_heap_size heap)
 
-let ti_dump_init = Dummy
+let ti_dump_init = []
 
 let ti_stat_init : ti_stats = (0, 0, 0, 0)
 let ti_stat_inc (s, p, c, d) = (s + 1, p, c, d)
@@ -559,12 +561,24 @@ let allocate_sc heap (name, args, body) =
   let (heap', addr) = ti_heap_alloc heap sc in
   (heap', (name, addr))
 
+(* Primitive operators supported in Core *)
+let primitives = [ ("negate", Neg); ("+", Add); ("-", Sub); ("*", Mul); ("/", Div) ]
+(* Allocates a primitive definition on the heap *)
+let allocate_prim heap (name, prim) =
+  let (heap', addr) = ti_heap_alloc heap (NPrim (name, prim)) in
+  (heap', (name, addr))
+
+(* Build an initial heap from definitions *)
+let build_initial_heap defs =
+  let (heap1, sc_addrs) = map_accuml allocate_sc ti_heap_initial defs in
+  let (heap2, prim_addrs) = map_accuml allocate_prim heap1 primitives in
+  (heap2, sc_addrs @ prim_addrs)
+
 (* Compile Core program *)
 let compile (p : core_program) : ti_state =
   (* gather up all supercombinator defs and prelude *)
   let sc_defs = p @ prelude_defs @ extra_prelude_defs in
   (* build initial heap from definitions *)
-  let build_initial_heap = map_accuml allocate_sc ti_heap_initial in
   (* initial heap contains program and prelude sc nodes *)
   (* globals contains names to address mapping *)
   let (heap, globals) = build_initial_heap sc_defs in
@@ -579,10 +593,10 @@ let is_data_node (n : node) = match n with
   | _ -> false
 
 (* Detects final state *)
-let ti_final (stack, dump, heap, globals, stats) = match stack with
-  | [addr] -> is_data_node (ti_heap_lookup heap addr)
-  | []     -> failwith "Empty stack"
-  | state  -> false
+let ti_final (stack, dump, heap, globals, stats) = match stack, dump with
+  | [addr], [] -> is_data_node (ti_heap_lookup heap addr)
+  | [], _      -> failwith "Empty stack"
+  | _, _   -> false
 
 (* creates instance of expression on the heap *)
 let rec instantiate body heap (env : ti_globals) : (ti_heap * addr) = match body with
@@ -641,7 +655,9 @@ and instantiate_and_update (expr : core_expr) upd_addr heap env : ti_heap = matc
                       ti_heap_update heap2 upd_addr (NAp (a1, a2))
     | ENum n -> ti_heap_update heap upd_addr (NNum n)
 
-    | EVar v -> ti_heap_update heap upd_addr (NInd (List.assoc v env))
+    | EVar v ->
+        let v_addr = List.assoc v env in
+        ti_heap_update heap upd_addr (NInd v_addr)
 
     | EConstr (tag, arity) ->
       fst @@ instantiate_constr tag arity heap env
@@ -654,6 +670,7 @@ and instantiate_and_update (expr : core_expr) upd_addr heap env : ti_heap = matc
     | ECase _ -> failwith "cant handle case expr"
 
     | _ -> failwith "dont know how to instantiate"
+
 and instantiate_let_and_update defs body upd_addr heap env : ti_heap =
   (* allocate a def in let *)
   let alloc heap (name, rhs) =
@@ -661,6 +678,7 @@ and instantiate_let_and_update defs body upd_addr heap env : ti_heap =
     (h, (name, addr)) in
   let (heap', env') = map_accuml alloc heap defs in
   instantiate_and_update body upd_addr heap' (env' @ env)
+
 and instantiate_letrec_and_update defs body upd_addr heap env =
   (* there's probably a better way to do this instead of allocating and copying *)
   (* first allocate all the rhs with dummy values*)
@@ -691,11 +709,28 @@ let rec take n ls = match (n, ls) with
 
 
 (* a number should never be applied as a function *)
-let num_step state n = failwith "Number applied as function"
+let num_step (stack, dump, heap, globals, stats) n =
+  (* rule 2.7, when only item on stack is a number and dump is not empty
+   * pop the top of the dump and continue there *)
+  match stack, dump with
+  | a :: [], s :: d ->
+      begin
+        match ti_heap_lookup heap a with
+        | NNum _ -> (s, d, heap, globals, stats)
+        | _ -> failwith "error in num_step"
+      end
+  | _ -> failwith "Number applied as function"
 
 (* unwind rule *)
 let ap_step (stack, dump, heap, globals, stats) a1 a2 =
-  (a1 :: stack, dump, heap, globals, ti_stat_depth stats (List.length stack + 1))
+                (* [a  : NAp  a1 a2] *)
+    (* a :: s, d, h[a2 : NInd a3   ], f *)
+
+(* =>  a :: s, d, h[a : NAp a1 a3  ], f *)
+  (* rule 2.8, check if arg is an indirection, and update it to the target *)
+  match stack, ti_heap_lookup heap a2 with
+  | a :: s, NInd a3 -> (stack, dump, ti_heap_update heap a (NAp (a1, a3)), globals, stats)
+  | _ -> (a1 :: stack, dump, heap, globals, ti_stat_depth stats (List.length stack + 1))
 
 (* check if an supercombinator is underapplied, fails if so *)
 let check_under_application sc args stack_args =
@@ -709,6 +744,13 @@ let rec zip2 xs ys = match xs, ys with
   | [], _ | _, [] -> []
   | x::xs, y::ys  -> (x, y)::(zip2 xs ys)
 
+(* get nodes pointed to by addresses on the stack *)
+let get_args (_::stack) heap : addr list =
+  let rec get_arg addr = match ti_heap_lookup heap addr with
+    | NAp (f, arg) -> arg
+    | _ -> failwith "error getargs" in
+  List.map get_arg stack
+
 let sc_step (stack, dump, heap, globals, stats) sc args body =
   (* get address of all args on the stack, e.g.
    *       (NAp1)
@@ -721,11 +763,8 @@ let sc_step (stack, dump, heap, globals, stats) sc args body =
    * The stack contains [NSc; NAp2; NAp1],
    * x needs to be bound to a1, y to a2.
    **)
-  let rec get_arg addr = match ti_heap_lookup heap addr with
-    | NAp (f, arg) -> arg
-    | _ -> failwith "error getargs" in
   (* bind arg names to addresses *)
-  let stack_args = List.map get_arg (List.tl stack) in
+  let stack_args = get_args stack heap in
   (* check that supercombinator is not underapplied, error out otherwise *)
   check_under_application sc args stack_args;
   (* zip2 will take care when length of args and stack args don't match *)
@@ -743,6 +782,88 @@ let sc_step (stack, dump, heap, globals, stats) sc args body =
   (* update root of redex with indirection to result *)
   (stack', dump, heap', globals, count_reduction stats)
 
+let prim_neg (stack, dump, heap, globals, stats) =
+  (* extract address of arguments from stack and lookup nodes *)
+  let arg = match get_args stack heap with
+  | arg::[] -> arg
+  | _ -> failwith "insufficient args to prim neg"
+  in
+  let node = ti_heap_lookup heap arg in
+  if is_data_node node
+  then
+    let res =
+      begin
+        match node with
+        | NNum n -> NNum (- n)
+        | _ -> failwith "not data node"
+      end in
+    (* update redex root *)
+    begin
+      match stack with
+      | _ :: a1 :: [] -> ([a1], dump, ti_heap_update heap a1 res , globals, stats)
+      | _ -> failwith "stack does not have sufficient"
+    end
+  (* use rule 2.9 to set up new state to evaluate argument*)
+  else
+    begin
+      match stack with
+      | _ :: a1 :: [] ->
+        begin
+          match ti_heap_lookup heap a1 with
+            | NAp (_, b) -> ([b], [a1] :: dump, heap, globals, stats)
+            | _          -> failwith "stack can only have NAp"
+        end
+      | _ -> failwith "stack does not have sufficient"
+    end
+
+let prim_arith (stack, dump, heap, globals, stats) op =
+  (* extract address of arguments from stack and lookup nodes *)
+  let (arg1, arg2) = match get_args stack heap with
+  | arg1::arg2::[] -> (arg1, arg2)
+  | _ -> failwith "insufficient args to prim neg"
+  in
+  let (node1, node2) = (ti_heap_lookup heap arg1, ti_heap_lookup heap arg2) in
+  if is_data_node node1 && is_data_node node2
+  then
+    let res =
+      begin
+        match node1, node2 with
+        | NNum m, NNum n -> NNum (op m n)
+        | _ -> failwith "not num nodes"
+      end in
+    (* update redex root *)
+    begin
+      match stack with
+      | _ :: _ :: a1 :: [] -> ([a1], dump, ti_heap_update heap a1 res , globals, stats)
+      | _ -> failwith "stack does not have sufficient"
+    end
+  (* use rule 2.9 to set up new state to evaluate argument*)
+  else
+    begin
+      match stack with
+      | _ :: a1 :: a2 :: [] ->
+        begin
+          match ti_heap_lookup heap a1, ti_heap_lookup heap a2 with
+            | NAp (_, b), NAp (_, b2) -> ([b], [b2] :: [a2] :: dump, heap, globals, stats)
+            | NAp (_, b), _           -> ([b], [a1] :: dump, heap, globals, stats)
+            | _, NAp (_, b)           -> ([b], [a2] :: dump, heap, globals, stats)
+            | _          -> failwith "stack can only have NAp"
+        end
+      | _ -> failwith "stack does not have sufficient"
+    end
+
+let prim_add state = prim_arith state (+)
+let prim_sub state = prim_arith state (-)
+let prim_div state = prim_arith state (/)
+let prim_mul state = prim_arith state ( * )
+
+let prim_step state = function
+  | Neg -> prim_neg state
+  | Add -> prim_add state
+  | Sub -> prim_sub state
+  | Mul -> prim_mul state
+  | Div -> prim_div state
+
 (* step to the next state *)
 let step (state : ti_state) =
   let (stack, dump, heap, globals, stats) = state in
@@ -752,6 +873,7 @@ let step (state : ti_state) =
     | NSupercomb (sc, args, body) -> sc_step state sc args body
     | NNum n -> num_step state n
     | NInd a -> (a :: (List.tl stack), dump, heap, globals, stats)
+    | NPrim (n, prim) -> prim_step state prim
 
 (** Facilities for printing the stack *)
 
@@ -770,7 +892,8 @@ let show_state (stack, _, heap, _, _) =
                                 i_str " "; show_addr a2 ]
     | NSupercomb (name, args, body) -> i_str ("NSupercomb " ^ name)
     | NNum n -> i_append (i_str "NNum ") (i_num n)
-    | NInd a -> i_append (i_str "NInd ") (show_addr a) in
+    | NInd a -> i_append (i_str "NInd ") (show_addr a)
+    | NPrim (name, prim) -> i_str ("NPrim " ^ name) in
   (* show a node, if it's an application we show the argument *)
   let show_stack_node heap node = match node with
     | NAp (faddr, argaddr) -> i_concat [ i_str "NAp "; show_fw_addr faddr; i_str " ";
@@ -822,6 +945,7 @@ let doAdmin state = let state = apply_to_stats ti_stat_inc state in
   let results = show_results [state] in
   print_endline results;
   state
+(* let doAdmin state = apply_to_stats ti_stat_inc state *)
 
 let rec eval (state : ti_state) : ti_state list =
   let rest_states =
@@ -833,8 +957,8 @@ let rec eval (state : ti_state) : ti_state list =
 
 (* run a Core program in string form *)
 let run_prog_string s =
-  s |> parse_string |> compile |> eval |> fun x -> ""
+  s |> parse_string |> compile |> eval |> show_results
 
 (* run a Core program in a file *)
 let run_prog filename =
-  filename |> parse |> compile |> eval |> fun x -> ""
+  filename |> parse |> compile |> eval |> show_results

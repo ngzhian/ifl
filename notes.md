@@ -500,6 +500,63 @@ One more rule is needed to handle indirections:
 The address of the indirection is removed from the stack, replaced with the node
 that is indirected to.
 
+Each time we instantiate a supercombinator, we are creating an `NInd` which
+points to the new instance,
+and updating the redex root to this `NInd`.
+An optimization to reduce heap allocation is to
+directly update the redex root to the new instance root.
+
+### Arithmetic
+
+The rule for unary negation (rule 2.5):
+
+```
+                       [a  : NPrim Neg]
+    a :: a1 :: [], d, h[a1 : NAp a b  ], f
+                       [b  : NNum n   ]
+
+=>       a1 :: [], d, h[a1 : NNum (-n)], f
+```
+
+This rule applies when the stack only has the negation operator and a number,
+otherwise it would be a type error.
+
+If the argument is not evaluated, it needs to be evaluated on a fresh stack (rule 2.6):
+
+```
+                                          [a  : NPrim Neg]
+    a :: a1 :: [],                    d, h[a1 : NAp a b  ], f
+
+=>       b  :: [], (a :: a1 :: []) :: d, h                , f
+```
+
+The negation operator and application node is pushed onto the dump,
+and evaluation of continues on a fresh stack.
+
+To restore the old stack after evaluation (rule 2.7):
+
+```
+    a :: [], s :: d, h[a : NNum n], f
+=>        s,      d, h            , f
+```
+
+The argument is now in normal form, but it can be an indirection node (rule 2.8):
+
+```
+                [a  : NAp  a1 a2]
+    a :: s, d, h[a2 : NInd a3   ], f
+
+=>  a :: s, d, h[a : NAp a1 a3  ], f
+```
+
+Then the rule previously (rule 2.6) needs to be updated to (rule 2.9):
+```
+                                          [a  : NPrim Neg]
+    a :: a1 :: [],                    d, h[a1 : NAp a b  ], f
+
+=>       b  :: [], (a :: a1 :: []) :: d, h                , f
+```
+
 ```
 twice f = f f
 main = twice id 3
