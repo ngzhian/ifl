@@ -63,11 +63,14 @@ let prelude_defs : core_program =
                             EVar "f"));
     ("False", [], EConstr (false_tag, 0));
     ("True", [], EConstr (true_tag, 0));
+    ("MkPair", [], EConstr (1, 2));
   ]
 let extra_prelude_defs = [
   ("and", ["x"; "y"], EAp (EAp (EAp (EVar "if", EVar "x"), EVar "y"), EVar "False"));
   ("or", ["x"; "y"], EAp (EAp (EAp (EVar "if", EVar "x"), EVar "x"), EVar "y"));
   ("not", ["x"], EAp (EAp (EAp (EVar "if", EVar "x"), EVar "False"), EVar "True"));
+  ("fst", ["p"], EAp (EAp (EVar "casePair", EVar "p"), EVar "K"));
+  ("snd", ["p"], EAp (EAp (EVar "casePair", EVar "p"), EVar "K1"));
   (* ("xor", ["x"; "y"], EAp (EAp (EAp (EVar "if", EVar "x"), EVar "x"), EVar "y")); *)
   (* 1 0, 1 *)
   (* 0 1, 1 *)
@@ -417,9 +420,9 @@ and p_pexpr toks = (* parenthesized expr *)
   p_then3 mk_expr (p_lit "(") p_expr (p_lit ")") toks
 and p_pack toks =
   let mk_pack_var tag _ arity = (tag, arity) in
-  let pPackVar toks = p_then3 mk_pack_var p_num (p_lit ",") p_num toks in
+  let p_packvar toks = p_then3 mk_pack_var p_num (p_lit ",") p_num toks in
   let mk_pack _ _ (tag, arity) _ = EConstr (tag, arity) in
-  p_then4 mk_pack (p_lit "Pack") (p_lit "{") pPackVar (p_lit "}") toks
+  p_then4 mk_pack (p_lit "Pack") (p_lit "{") p_packvar (p_lit "}") toks
 and p_aexpr toks = (* atomic expressions *)
   p_alt (p_alt p_evar p_enum) p_pexpr toks
 and p_elam toks =
@@ -515,9 +518,13 @@ and node =
   | NInd of addr                                 (* indirection *)
   | NPrim of name * primitive                    (* primitive *)
   | NData of int * addr list                     (* tag and list of components *)
-and primitive = Neg | Add | Sub | Mul | Div | PrimConstr of int * int
+(* primitive operations the machine supports *)
+and primitive =
+  | Neg | Add | Sub | Mul | Div
+  | PrimConstr of int * int                      (* tag, arity *)
   | If
   | Greater | GreaterEq | Less | LessEq | Eq | NotEq
+  | CasePair
 (* Mapping of names (supercombinators) to addresses in heap *)
 and ti_globals = (name * addr) list
 (* Stats for execution of the machine *)
@@ -588,6 +595,7 @@ let primitives = [
   (">", Greater ); (">=", GreaterEq );
   ("<", Less ); ("<=", LessEq );
   ("==", Eq ); ("~=", NotEq);
+  ("casePair", CasePair);
 ]
 (* Allocates a primitive definition on the heap *)
 let allocate_prim heap (name, prim) =
@@ -732,7 +740,6 @@ let rec take n ls = match (n, ls) with
   | 0, ls    -> [], ls
   | n, l::ls -> let (xs, ys) = take (n - 1) ls in l :: xs, ys
   | _, []    -> [], []
-
 
 (* a number should never be applied as a function *)
 let num_step (stack, dump, heap, globals, stats) n =
@@ -939,6 +946,35 @@ let prim_if (stack, dump, heap, globals, stats) =
       | _          -> failwith "insufficient args on stack"
     end
 
+let prim_case_pair (stack, dump, heap, globals, stats) =
+  (* fst . (mkpair (1) ( 2) *)
+  (* CasePair p f *)
+  let (p, f) = match get_args stack heap with
+    | p::f::[] -> (p, f)
+    | _ -> failwith "prim_case_pair argument mismatch"
+  in
+  match ti_heap_lookup heap p with
+  | NData (1, a::b::[]) ->
+    begin match stack with
+      | _::p::root::[] ->
+        (* casepair is translated into function applications *)
+        let heap' = ti_heap_update heap p (NAp (f, a)) in
+        let heap'' = ti_heap_update heap' root (NAp (p, b)) in
+        (* jump to the function given to casepair *)
+        ([f; p; root], dump, heap'', globals, stats)
+      | _ -> failwith "error!"
+    end
+  | NData _ -> failwith "unknown data for prim_case_pair"
+  | _ -> begin
+      match stack with
+      | _::p::f::[] -> begin
+          match ti_heap_lookup heap p with
+          | NAp (_, b) -> ([b], [p; f]::dump, heap, globals, stats)
+          | _          -> failwith "stack can only have NAp"
+        end
+      | _ -> failwith "insufficient args on stack"
+    end
+
 let prim_step state = function
   | Neg -> prim_neg state
   | Add -> prim_add state
@@ -953,6 +989,7 @@ let prim_step state = function
   | GreaterEq -> prim_gte state
   | Less -> prim_lt state
   | LessEq -> prim_lte state
+  | CasePair -> prim_case_pair state
 
 let data_step (stack, dump, heap, globals, stats) =
   (* rule 2.7 but for data, when only item on stack is a data and dump is not empty
@@ -1017,7 +1054,7 @@ let show_state (stack, _, heap, _, _) =
   (* show the heap *)
   let show_heap = wrap "Heap" (i_line_btwn show_addr_node (ti_heap_addrs heap)) in
   i_concat [ show_stack; i_newline;
-             show_heap;
+             (* show_heap; *)
              i_newline ]
 
 (* show stats from running machine *)
@@ -1063,10 +1100,7 @@ let rec eval (state : ti_state) : ti_state list =
   let rest_states =
     if ti_final state
     then []
-    (* else *)
-      (* let _ = c := !c + 1 in *)
-      (* if !c > 20 then failwith "over" *)
-      (* else eval (doAdmin (step state)) *)
+    (* else let _ = c := !c + 1 in if !c > 20 then failwith "over" *)
     else eval (doAdmin (step state))
   in
   state :: rest_states
