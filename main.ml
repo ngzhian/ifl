@@ -57,9 +57,20 @@ let prelude_defs : core_program =
     ("compose", ["f"; "g"; "x"], EAp (EVar "f",
                                       EAp (EVar "g", EVar "x")));
     ("twice",   ["f"], EAp (EAp (EVar "compose", EVar "f"),
-                            EVar "f"))
+                            EVar "f"));
+    ("False", [], EConstr (1, 0));
+    ("True", [], EConstr (2, 0));
   ]
-let extra_prelude_defs = []
+let extra_prelude_defs = [
+  ("and", ["x"; "y"], EAp (EAp (EAp (EVar "if", EVar "x"), EVar "y"), EVar "False"));
+  ("or", ["x"; "y"], EAp (EAp (EAp (EVar "if", EVar "x"), EVar "x"), EVar "y"));
+  ("not", ["x"], EAp (EAp (EAp (EVar "if", EVar "x"), EVar "False"), EVar "True"));
+  (* ("xor", ["x"; "y"], EAp (EAp (EAp (EVar "if", EVar "x"), EVar "x"), EVar "y")); *)
+  (* 1 0, 1 *)
+  (* 0 1, 1 *)
+  (* 1 1, 0 *)
+  (* 0 0, 0 *)
+]
 let prelude_names = List.map (fun (name, _, _) -> name) prelude_defs
 
 (* slow pretty print functions based on string concatenation *)
@@ -427,7 +438,10 @@ and p_expr2c toks =
 and p_expr3 toks =
   p_then assemble_op p_expr4 p_expr3c toks
 and p_expr3c toks =
-  p_alt (p_then found_op (p_lit "|") p_expr3) (p_empty NoOp) toks
+  p_alt (p_then found_op p_relop p_expr3) (p_empty NoOp) toks
+and p_relop toks =
+  let ops = List.map p_lit ("<"::two_char_ops) in
+  (List.fold_left (fun a b -> p_alt a b) (p_lit ">") ops) toks
 and p_expr4 toks =
   p_then assemble_op p_expr5 p_expr4c toks
 and p_expr4c toks =
@@ -497,7 +511,10 @@ and node =
   | NNum of int
   | NInd of addr                                 (* indirection *)
   | NPrim of name * primitive                    (* primitive *)
-and primitive = Neg | Add | Sub | Mul | Div
+  | NData of int * addr list                     (* tag and list of components *)
+and primitive = Neg | Add | Sub | Mul | Div | PrimConstr of int * int
+  | If
+  | Greater | GreaterEq | Less | LessEq | Eq | NotEq
 (* Mapping of names (supercombinators) to addresses in heap *)
 and ti_globals = (name * addr) list
 (* Stats for execution of the machine *)
@@ -562,7 +579,13 @@ let allocate_sc heap (name, args, body) =
   (heap', (name, addr))
 
 (* Primitive operators supported in Core *)
-let primitives = [ ("negate", Neg); ("+", Add); ("-", Sub); ("*", Mul); ("/", Div) ]
+let primitives = [
+  ("if", If);
+  ("negate", Neg); ("+", Add); ("-", Sub); ("*", Mul); ("/", Div);
+  (">", Greater ); (">=", GreaterEq );
+  ("<", Less ); ("<=", LessEq );
+  ("==", Eq ); ("~=", NotEq);
+]
 (* Allocates a primitive definition on the heap *)
 let allocate_prim heap (name, prim) =
   let (heap', addr) = ti_heap_alloc heap (NPrim (name, prim)) in
@@ -589,7 +612,7 @@ let compile (p : core_program) : ti_state =
   (stack, ti_dump_init, heap, globals, ti_stat_init)
 
 let is_data_node (n : node) = match n with
-  | NNum _ -> true
+  | NNum _ | NData _ -> true
   | _ -> false
 
 (* Detects final state *)
@@ -621,7 +644,7 @@ let rec instantiate body heap (env : ti_globals) : (ti_heap * addr) = match body
 
   | _ -> failwith "dont know how to instantiate"
 and instantiate_constr tag arity heap env =
-  failwith "instantiate_constr not impl"
+  ti_heap_alloc heap (NPrim ("Pack", (PrimConstr (tag, arity))))
 and instantiate_let defs body heap env =
   (* allocate a def in let *)
   let alloc heap (name, rhs) =
@@ -660,7 +683,7 @@ and instantiate_and_update (expr : core_expr) upd_addr heap env : ti_heap = matc
         ti_heap_update heap upd_addr (NInd v_addr)
 
     | EConstr (tag, arity) ->
-      fst @@ instantiate_constr tag arity heap env
+      ti_heap_update heap upd_addr (NPrim ("Pack", (PrimConstr (tag, arity))))
 
     | ELet (isrec, defs, body) ->
       if isrec
@@ -816,7 +839,7 @@ let prim_neg (stack, dump, heap, globals, stats) =
       | _ -> failwith "stack does not have sufficient"
     end
 
-let prim_arith (stack, dump, heap, globals, stats) op =
+let prim_dyadic (stack, dump, heap, globals, stats) combine : ti_state =
   (* extract address of arguments from stack and lookup nodes *)
   let (arg1, arg2) = match get_args stack heap with
   | arg1::arg2::[] -> (arg1, arg2)
@@ -825,12 +848,7 @@ let prim_arith (stack, dump, heap, globals, stats) op =
   let (node1, node2) = (ti_heap_lookup heap arg1, ti_heap_lookup heap arg2) in
   if is_data_node node1 && is_data_node node2
   then
-    let res =
-      begin
-        match node1, node2 with
-        | NNum m, NNum n -> NNum (op m n)
-        | _ -> failwith "not num nodes"
-      end in
+    let res = combine node1 node2 in
     (* update redex root *)
     begin
       match stack with
@@ -852,10 +870,68 @@ let prim_arith (stack, dump, heap, globals, stats) op =
       | _ -> failwith "stack does not have sufficient"
     end
 
+let prim_arith state op =
+  let combine node1 node2 =
+    match node1, node2 with
+    | NNum m, NNum n -> NNum (op m n)
+    | _ -> failwith "not num nodes"
+  in
+  prim_dyadic state combine
+
+let prim_comp state op =
+  let combine node1 node2 =
+    match node1, node2 with
+    | NNum m, NNum n -> let res = op m n in
+      if res = true then NData (2, []) else NData (1, [])
+    | _ -> failwith "not num nodes"
+  in
+  prim_dyadic state combine
+
 let prim_add state = prim_arith state (+)
 let prim_sub state = prim_arith state (-)
 let prim_div state = prim_arith state (/)
 let prim_mul state = prim_arith state ( * )
+let prim_eq state = prim_comp state (=)
+let prim_neq state = prim_comp state (<>)
+let prim_gt state = prim_comp state (>)
+let prim_gte state = prim_comp state (>=)
+let prim_lt state = prim_comp state (<)
+let prim_lte state = prim_comp state (<=)
+
+let prim_constr (stack, d, heap, g, st) tag arity =
+  (* check that there are enough args *)
+  let args = get_args stack heap in
+  if List.length args != arity
+  then failwith "WRong number of args to build Constr"
+  else begin
+    let (dropped, _) = take (List.length args + 1) stack in
+    let root = last dropped in
+    let heap' = ti_heap_update heap root (NData (tag, args)) in
+    (root::[], d, heap', g, st)
+  end
+
+let prim_if (stack, dump, heap, globals, stats) =
+  let (arg, t, f) = match get_args stack heap with
+    | (arg::t::f::[]) -> arg, t, f
+    | _ -> failwith "prim if args mismatch"
+  in
+  match ti_heap_lookup heap arg with
+  | NData (tf, _) -> begin
+      match stack with
+      | _ :: _ :: _ :: root :: [] ->
+          let target = if tf = 1 then f else t in
+          ([target], dump, ti_heap_update heap root (NInd target), globals, stats)
+      | _ -> failwith "insuff e13"
+    end
+  | _ -> begin
+      match stack with
+      | _ :: a1 :: t :: f :: [] -> begin
+          match ti_heap_lookup heap a1 with
+          | NAp (_, b) -> ([b], [a1; t; f]::dump, heap, globals, stats)
+          | _          -> failwith "stack can only have NAp"
+        end
+      | _          -> failwith "123 stack no sufficient"
+    end
 
 let prim_step state = function
   | Neg -> prim_neg state
@@ -863,6 +939,27 @@ let prim_step state = function
   | Sub -> prim_sub state
   | Mul -> prim_mul state
   | Div -> prim_div state
+  | PrimConstr (tag, arity) -> prim_constr state tag arity
+  | If -> prim_if state
+  | Eq -> prim_eq state
+  | NotEq -> prim_neq state
+  | Greater -> prim_gt state
+  | GreaterEq -> prim_gte state
+  | Less -> prim_lt state
+  | LessEq -> prim_lte state
+
+let data_step (stack, dump, heap, globals, stats) =
+  (* rule 2.7 but for data, when only item on stack is a data and dump is not empty
+   * pop the top of the dump and continue there *)
+  match stack, dump with
+  | a :: [], s :: d ->
+      begin
+        match ti_heap_lookup heap a with
+        | NData _ -> (s, d, heap, globals, stats)
+        | _ -> failwith "error in data_step"
+      end
+  | _ -> failwith "Data applied as function"
+
 
 (* step to the next state *)
 let step (state : ti_state) =
@@ -874,6 +971,7 @@ let step (state : ti_state) =
     | NNum n -> num_step state n
     | NInd a -> (a :: (List.tl stack), dump, heap, globals, stats)
     | NPrim (n, prim) -> prim_step state prim
+    | NData (tag, addrs) -> data_step state
 
 (** Facilities for printing the stack *)
 
@@ -893,7 +991,11 @@ let show_state (stack, _, heap, _, _) =
     | NSupercomb (name, args, body) -> i_str ("NSupercomb " ^ name)
     | NNum n -> i_append (i_str "NNum ") (i_num n)
     | NInd a -> i_append (i_str "NInd ") (show_addr a)
-    | NPrim (name, prim) -> i_str ("NPrim " ^ name) in
+    | NPrim (name, prim) -> i_str ("NPrim " ^ name)
+    | NData (tag, addrs) ->
+      i_concat [ i_str ("NData "); i_num tag;
+                 i_interleave (i_str " ") (List.map show_addr addrs) ]
+  in
   (* show a node, if it's an application we show the argument *)
   let show_stack_node heap node = match node with
     | NAp (faddr, argaddr) -> i_concat [ i_str "NAp "; show_fw_addr faddr; i_str " ";
@@ -909,7 +1011,9 @@ let show_state (stack, _, heap, _, _) =
   let show_stack = wrap "Stk" (i_line_btwn show_addr_node stack) in
   (* show the heap *)
   let show_heap = wrap "Heap" (i_line_btwn show_addr_node (ti_heap_addrs heap)) in
-  i_concat [ show_stack; i_newline; show_heap; i_newline ]
+  i_concat [ show_stack; i_newline;
+             (* show_heap; *)
+             i_newline ]
 
 (* show stats from running machine *)
 let show_stats (_, _, (_, n_alloc), _, (steps, p_r, s_r, depth)) =
@@ -938,7 +1042,9 @@ let show_results (states : ti_state list) : string =
          [step_title i; show_state s]) states in
   (* let ss = List.map show_state states in *)
   let stats = show_stats (last states) in
-  i_display (i_concat [ i_layn ss; stats ])
+  i_display (i_concat [ i_layn ss;
+                        (* stats; *)
+                      ])
 
 (* do some admin on state on each step *)
 let doAdmin state = let state = apply_to_stats ti_stat_inc state in
@@ -947,10 +1053,12 @@ let doAdmin state = let state = apply_to_stats ti_stat_inc state in
   state
 (* let doAdmin state = apply_to_stats ti_stat_inc state *)
 
+let c = ref 0
 let rec eval (state : ti_state) : ti_state list =
   let rest_states =
     if ti_final state
     then []
+    (* else let _ = c := !c + 1 in if !c > 20 then failwith "over" else eval (doAdmin (step state)) *)
     else eval (doAdmin (step state))
   in
   state :: rest_states

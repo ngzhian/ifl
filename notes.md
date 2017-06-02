@@ -550,15 +550,66 @@ The argument is now in normal form, but it can be an indirection node (rule 2.8)
 ```
 
 Then the rule previously (rule 2.6) needs to be updated to (rule 2.9):
-```
-                                          [a  : NPrim Neg]
-    a :: a1 :: [],                    d, h[a1 : NAp a b  ], f
-
-=>       b  :: [], (a :: a1 :: []) :: d, h                , f
-```
 
 ```
-twice f = f f
-main = twice id 3
-       id id 3
+                                     [a  : NPrim Neg]
+    a :: a1 :: [],               d, h[a1 : NAp a b  ], f
+
+=>       b  :: [], (a1 :: []) :: d, h                , f
 ```
+
+We unwind directly to the root of the redex.
+
+### Structured data
+
+To represent a structured data, we have a new type of node `NData`,
+which has a tag and the list of addresses that point to component nodes.
+
+To construct this node, we have a new primitive `PrimConstr` that represents `Pack`.
+This checks that the number of arguments matches the arity,
+and creates a `NData` node in the heap.
+
+```
+                                 [a  : NPrim (PrimConstr t n)]
+    a :: a1 ... :: an :: [], d, h[a1 : NAp a b1              ], f
+                                 [ ...                       ]
+                                 [an : NAp an-1 bn           ]
+
+=>                 an :: [], d, h[an : NData t [b1; ...; bn] ], f
+```
+
+To take constructors apart, representing case expressions,  we need to have special cases.
+
+#### Conditionals
+
+When the first argument, test condition, is evaluated, there are two rules,
+one for the true case, another for the false case:
+
+```
+                       [a  : NPrim If        ]
+    a :: a1 :: [], d, h[a1 : NData 2 [b1; b2]], f
+=>       b1 :: [], d, h[a1 : NInd b1         ], f
+```
+
+```
+                       [a  : NPrim If        ]
+    a :: a1 :: [], d, h[a1 : NData 1 [b1; b2]], f
+=>       b2 :: [], d, h[a1 : NInd b1         ], f
+```
+
+If the first argument is not evaluated yet, evaluate it:
+
+```
+                                   [a  : NPrim If ]
+    a :: a1 :: [],             d, h[a1 : NAp a b  ], f
+=>       b  :: [], (a1::[]) :: d, h                , f
+```
+
+And one more rule to handle the case when the evaluation of test condition is complete
+
+```
+    a :: [], s :: d, h[a : NData tag ctrs], f
+=>        s,      d, h                    , f
+```
+
+
