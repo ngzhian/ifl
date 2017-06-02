@@ -47,6 +47,9 @@ let is_atomic_expr (e : 'a expr) : bool = match e with
   | ENum _ -> true
   | _      -> false
 
+let true_tag = 2
+and false_tag = 1
+
 (* Prelude (pervasives) to be included in all Core programs *)
 let prelude_defs : core_program =
   [ ("I",  ["x"], EVar "x");
@@ -58,8 +61,8 @@ let prelude_defs : core_program =
                                       EAp (EVar "g", EVar "x")));
     ("twice",   ["f"], EAp (EAp (EVar "compose", EVar "f"),
                             EVar "f"));
-    ("False", [], EConstr (1, 0));
-    ("True", [], EConstr (2, 0));
+    ("False", [], EConstr (false_tag, 0));
+    ("True", [], EConstr (true_tag, 0));
   ]
 let extra_prelude_defs = [
   ("and", ["x"; "y"], EAp (EAp (EAp (EVar "if", EVar "x"), EVar "y"), EVar "False"));
@@ -910,18 +913,21 @@ let prim_constr (stack, d, heap, g, st) tag arity =
     (root::[], d, heap', g, st)
   end
 
+(* evaluate an if primitive *)
 let prim_if (stack, dump, heap, globals, stats) =
-  let (arg, t, f) = match get_args stack heap with
-    | (arg::t::f::[]) -> arg, t, f
+  (* ensure we have the test, true clause, false clause on stack *)
+  let (test, t, f) = match get_args stack heap with
+    | (test::t::f::[]) -> test, t, f
     | _ -> failwith "prim if args mismatch"
   in
-  match ti_heap_lookup heap arg with
+  match ti_heap_lookup heap test with
+  (* with a NData node, we can jump to the true or false clause *)
   | NData (tf, _) -> begin
       match stack with
       | _ :: _ :: _ :: root :: [] ->
           let target = if tf = 1 then f else t in
           ([target], dump, ti_heap_update heap root (NInd target), globals, stats)
-      | _ -> failwith "insuff e13"
+      | _ -> failwith "insufficient args on stack"
     end
   | _ -> begin
       match stack with
@@ -930,7 +936,7 @@ let prim_if (stack, dump, heap, globals, stats) =
           | NAp (_, b) -> ([b], [a1; t; f]::dump, heap, globals, stats)
           | _          -> failwith "stack can only have NAp"
         end
-      | _          -> failwith "123 stack no sufficient"
+      | _          -> failwith "insufficient args on stack"
     end
 
 let prim_step state = function
@@ -959,7 +965,6 @@ let data_step (stack, dump, heap, globals, stats) =
         | _ -> failwith "error in data_step"
       end
   | _ -> failwith "Data applied as function"
-
 
 (* step to the next state *)
 let step (state : ti_state) =
@@ -1012,7 +1017,7 @@ let show_state (stack, _, heap, _, _) =
   (* show the heap *)
   let show_heap = wrap "Heap" (i_line_btwn show_addr_node (ti_heap_addrs heap)) in
   i_concat [ show_stack; i_newline;
-             (* show_heap; *)
+             show_heap;
              i_newline ]
 
 (* show stats from running machine *)
@@ -1043,13 +1048,13 @@ let show_results (states : ti_state list) : string =
   (* let ss = List.map show_state states in *)
   let stats = show_stats (last states) in
   i_display (i_concat [ i_layn ss;
-                        (* stats; *)
+                        stats;
                       ])
 
 (* do some admin on state on each step *)
-let doAdmin state = let state = apply_to_stats ti_stat_inc state in
-  let results = show_results [state] in
-  print_endline results;
+let doAdmin state =
+  let state = apply_to_stats ti_stat_inc state in
+  print_endline (show_results [state]);
   state
 (* let doAdmin state = apply_to_stats ti_stat_inc state *)
 
@@ -1058,7 +1063,10 @@ let rec eval (state : ti_state) : ti_state list =
   let rest_states =
     if ti_final state
     then []
-    (* else let _ = c := !c + 1 in if !c > 20 then failwith "over" else eval (doAdmin (step state)) *)
+    (* else *)
+      (* let _ = c := !c + 1 in *)
+      (* if !c > 20 then failwith "over" *)
+      (* else eval (doAdmin (step state)) *)
     else eval (doAdmin (step state))
   in
   state :: rest_states
