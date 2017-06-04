@@ -64,6 +64,8 @@ let prelude_defs : core_program =
     ("False", [], EConstr (false_tag, 0));
     ("True", [], EConstr (true_tag, 0));
     ("MkPair", [], EConstr (1, 2));
+    ("Nil", [], EConstr (1, 0));
+    ("Cons", [], EConstr (2, 2));
   ]
 let extra_prelude_defs = [
   ("and", ["x"; "y"], EAp (EAp (EAp (EVar "if", EVar "x"), EVar "y"), EVar "False"));
@@ -524,7 +526,8 @@ and primitive =
   | PrimConstr of int * int                      (* tag, arity *)
   | If
   | Greater | GreaterEq | Less | LessEq | Eq | NotEq
-  | CasePair
+  | CasePair | CaseList
+  | Abort
 (* Mapping of names (supercombinators) to addresses in heap *)
 and ti_globals = (name * addr) list
 (* Stats for execution of the machine *)
@@ -596,6 +599,7 @@ let primitives = [
   ("<", Less ); ("<=", LessEq );
   ("==", Eq ); ("~=", NotEq);
   ("casePair", CasePair);
+  ("caseList", CaseList);
 ]
 (* Allocates a primitive definition on the heap *)
 let allocate_prim heap (name, prim) =
@@ -975,6 +979,44 @@ let prim_case_pair (stack, dump, heap, globals, stats) =
       | _ -> failwith "insufficient args on stack"
     end
 
+let prim_case_list (stack, dump, heap, globals, stats) =
+  let (xs, cn, cc) = match get_args stack heap with
+    | xs::cn::cc::[] -> (xs, cn, cc)
+    | _ -> failwith "prim_case_list argument mismatch"
+  in
+  match ti_heap_lookup heap xs with
+  | NData (1, _) ->
+    begin match stack with
+      | _::xs::_::root::[] ->
+        print_endline ("ndata 1 is " ^ (string_of_int root));
+        ([cn], dump, ti_heap_update heap root (NInd cn), globals, stats)
+      | _ -> failwith "insufficnet'"
+    end
+  | NData (2, x_addr::xs_addr::[]) ->
+    begin match stack with
+      | _::xs::_::root::[] ->
+        (* casepair is translated into function applications *)
+        print_endline ("ndata 2 is " ^ (string_of_int root)) ;
+        let (heap', target) =
+          (ti_heap_update
+             (ti_heap_update heap xs (NAp (cc, x_addr)))
+             root (NAp(xs, xs_addr))), [cc; xs; root]
+        in
+        (target, dump, heap', globals, stats)
+      | _ -> failwith "error!"
+    end
+  | NData (_, _) -> failwith "Unknown tag for list"
+  | _ -> begin
+      print_endline "second";
+      match stack with
+      | _::p::cn::cc::[] -> begin
+          match ti_heap_lookup heap p with
+          | NAp (_, b) -> ([b], [p; cn; cc]::dump, heap, globals, stats)
+          | _          -> failwith "stack can only have NAp"
+        end
+      | _ -> failwith "insufficient args on stack"
+    end
+
 let prim_step state = function
   | Neg -> prim_neg state
   | Add -> prim_add state
@@ -990,6 +1032,8 @@ let prim_step state = function
   | Less -> prim_lt state
   | LessEq -> prim_lte state
   | CasePair -> prim_case_pair state
+  | CaseList -> prim_case_list state
+  | Abort -> failwith "aborted"
 
 let data_step (stack, dump, heap, globals, stats) =
   (* rule 2.7 but for data, when only item on stack is a data and dump is not empty
@@ -1100,7 +1144,7 @@ let rec eval (state : ti_state) : ti_state list =
   let rest_states =
     if ti_final state
     then []
-    (* else let _ = c := !c + 1 in if !c > 20 then failwith "over" *)
+    (* else let _ = c := !c + 1 in if !c > 60 then failwith "over" *)
     else eval (doAdmin (step state))
   in
   state :: rest_states
