@@ -613,3 +613,26 @@ And one more rule to handle the case when the evaluation of test condition is co
 ```
 
 
+## G-machine
+
+Template instantiation is slow because the template has to be traversed recursively
+each time we call `instantiate`. The idea of G-machine is
+to compile the supercombinator body into a sequence of instructions
+before running the program.
+And this sequence of instructions, when executed, will construct an instance
+of the supercombinator body.
+
+Thus, running a program separates into two stages, producing the instructions,
+intermediate form, at compile-time, and executing the instructions, at run-time.
+
+```
+f g x = K (g x)
+
+Push 1
+Push 1
+Mkap
+Pushglobal K
+Mkap
+Slide 3
+Unwind
+```
