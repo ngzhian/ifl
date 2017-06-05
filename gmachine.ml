@@ -30,6 +30,7 @@ type node =
   | NAp of addr * addr
   | NGlobal of int * gm_code
   | NInd of addr
+  | NConstr of int * addr list (* tag and components *)
 
 type gm_heap = node list * int
 
@@ -39,7 +40,7 @@ type gm_globals =
 
 type gm_stats = int
 
-type gm_output = char list
+type gm_output = string
 
 type gm_state =
     gm_output  (* current output *)
@@ -195,7 +196,7 @@ let alloc n state =
   let stack' = addrs @ get_stack state in
   put_stack stack' (put_heap heap state)
 
-let eval state : gm_state =
+let eval (state :gm_state) : gm_state =
   match get_stack state with
   | a::stack ->
     let dump = (get_code state, stack)::get_dump state in
@@ -399,7 +400,7 @@ let prelude_defs : core_program =
                             EVar "f"));
   ]
 
-let compile program =
+let compile program : gm_state =
   let build_initial_heap program =
     let compiled = List.map compile_sc (prelude_defs @ program) @ compiled_primitives in
     map_accuml allocate_sc Heap.init compiled
@@ -407,7 +408,7 @@ let compile program =
   let (heap, globals) = build_initial_heap program in
   (* entry point is main *)
   let initial_code = [Pushglobal main_entry; Eval] in
-  ([], initial_code, [], [], heap, globals, stat_initial)
+  ("", initial_code, [], [], heap, globals, stat_initial)
 
 let show_instruction (i : instruction) = match i with
   | Unwind -> i_str "Unwind"
@@ -451,22 +452,27 @@ let show_sc state (name, addr) =
     ]
   | _ -> failwith "fail to show sc"
 
-let show_addr = string_of_int
+let show_addr addr = i_str (string_of_int addr)
 let show_node state addr (node:node) = match node with
   | NNum n -> i_num n
   | NAp (a1, a2) -> i_concat [
-      i_str "Ap "; i_str (show_addr a1);
-      i_str " "; i_str (show_addr a2);
+      i_str "Ap "; show_addr a1;
+      i_str " "; show_addr a2;
     ]
   | NGlobal (n, g) ->
     let gs = List.filter (fun (n, a) -> addr = a) (get_globals state) in
     let v = fst (List.hd gs) in
     i_concat [i_str "Global "; i_str v]
-  | NInd addr -> i_concat [i_str "Ind "; i_str (show_addr addr)]
+  | NInd addr -> i_concat [i_str "Ind "; show_addr addr]
+  | NConstr (t, addrs) ->
+    i_concat [
+      i_str "Cons "; i_num t; i_str " [";
+      i_interleave (i_str ", ") (List.map show_addr addrs); i_str "]";
+    ]
 
 let show_stack_item state addr =
   i_concat [
-    i_str (show_addr addr); i_str ": ";
+    show_addr addr; i_str ": ";
     show_node state addr (Heap.lookup (get_heap state) addr);
   ]
 let show_stack state =
@@ -486,7 +492,7 @@ let show_short_instructions number code =
   i_concat [ i_str "{"; i_interleave (i_str "; ") dotcodes; i_str "}"]
 let show_short_stack stack =
   i_concat [ i_str "[";
-             i_interleave (i_str ", ") (List.map (fun addr -> i_str (show_addr addr)) stack);
+             i_interleave (i_str ", ") (List.map (fun addr -> show_addr addr) stack);
              i_str "]"
            ]
 let show_dump_item (code, stack) =
@@ -501,8 +507,12 @@ let show_dump (state:gm_state) =
                 (List.map show_dump_item (List.rev (get_dump state))));
     i_str "]"
   ]
+let show_output (state : gm_state) =
+  i_concat [ i_str "Output:\""; i_str (get_output state); i_str "\""]
+
 let show_state state =
   i_concat [
+    show_output state; i_newline;
     show_stack state; i_newline;
     show_dump state; i_newline;
     show_instructions (get_code state); i_newline;
