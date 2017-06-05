@@ -39,35 +39,48 @@ type gm_globals =
 
 type gm_stats = int
 
+type gm_output = char list
+
 type gm_state =
-    gm_code    (* current instruction stream *)
+    gm_output  (* current output *)
+  * gm_code    (* current instruction stream *)
   * gm_stack   (* current stack              *)
   * gm_dump    (* current dump               *)
   * gm_heap    (* heap of nodes              *)
   * gm_globals (* global addresses in heap   *)
   * gm_stats   (* statistics of machine      *)
 
-let get_code (i, _, _, _, _, _) = i
-let put_code i' (i, stack, dump, heap, globals, stats) = (i', stack, dump, heap, globals, stats)
+let get_output (output, _, _, _, _, _, _) : gm_output = output
+let put_output output' (output, i, stack, dump, heap, globals, stats) : gm_state =
+  (output', i, stack, dump, heap, globals, stats)
 
-let get_stack (_, stack, _, _, _, _) = stack
-let put_stack stack' (i, stack, dump, heap, globals, stats) = (i, stack', dump, heap, globals, stats)
+let get_code (_, i, _, _, _, _, _) : gm_code = i
+let put_code i' (output, i, stack, dump, heap, globals, stats) : gm_state =
+  (output, i', stack, dump, heap, globals, stats)
 
-let get_dump (_, _, dump, _, _, _) = dump
-let put_dump dump' (i, stack, dump, heap, globals, stats) = (i, stack, dump', heap, globals, stats)
+let get_stack (_, _, stack, _, _, _, _) : gm_stack = stack
+let put_stack stack' (output, i, stack, dump, heap, globals, stats) : gm_state =
+  (output, i, stack', dump, heap, globals, stats)
 
-let get_heap (_, _, _, heap, _, _) = heap
-let put_heap heap' (i, stack, dump, heap, globals, stats) = (i, stack, dump, heap', globals, stats)
+let get_dump (_, _, _, dump, _, _, _) :gm_dump = dump
+let put_dump dump' (output, i, stack, dump, heap, globals, stats) : gm_state =
+  (output, i, stack, dump', heap, globals, stats)
 
-let get_globals (_, _, _, _, globals, _) = globals
-let put_globals globals' (i, stack, dump, heap, globals, stats) = (i, stack, dump, heap, globals', stats)
+let get_heap (_, _, _, _, heap, _, _) : gm_heap = heap
+let put_heap heap' (output, i, stack, dump, heap, globals, stats) : gm_state =
+  (output, i, stack, dump, heap', globals, stats)
+
+let get_globals (_, _, _, _, _, globals, _) : gm_globals = globals
+let put_globals globals' (output, i, stack, dump, heap, globals, stats) : gm_state =
+  (output, i, stack, dump, heap, globals', stats)
 
 let stat_initial = 0
 let stat_inc_steps s = s + 1
 let stat_get_steps s = s
 
-let get_stats (_, _, _, _, _, stats) = stats
-let put_stats stats' (i, stack, dump, heap, globals, stats) = (i, stack, dump, heap, globals, stats')
+let get_stats (_, _, _, _, _, _, stats) : gm_stats = stats
+let put_stats stats' (output, i, stack, dump, heap, globals, stats) : gm_state =
+  (output, i, stack, dump, heap, globals, stats')
 
 let pushglobal f state =
   (* look up global in heap *)
@@ -394,7 +407,7 @@ let compile program =
   let (heap, globals) = build_initial_heap program in
   (* entry point is main *)
   let initial_code = [Pushglobal main_entry; Eval] in
-  (initial_code, [], [], heap, globals, stat_initial)
+  ([], initial_code, [], [], heap, globals, stat_initial)
 
 let show_instruction (i : instruction) = match i with
   | Unwind -> i_str "Unwind"
