@@ -9,7 +9,9 @@ type instruction =
   | Pushint of int
   | Push of int
   | Mkap
-  | Slide of int
+  (* | Slide of int *)
+  | Update of int
+  | Pop of int
 type gm_code = instruction list
 
 type addr = int
@@ -19,6 +21,7 @@ type node =
   | NNum of int
   | NAp of addr * addr
   | NGlobal of int * gm_code
+  | NInd of addr
 
 type gm_heap = node list * int
 
@@ -44,8 +47,8 @@ let put_stack stack' (i, stack, heap, globals, stats) = (i, stack', heap, global
 let get_heap (_, _, heap, _, _) = heap
 let put_heap heap' (i, stack, heap, globals, stats) = (i, stack, heap', globals, stats)
 
-(* globals are constant, so no put *)
 let get_globals (_, _, _, globals, _) = globals
+let put_globals globals' (i, stack, heap, globals, stats) = (i, stack, heap, globals', stats)
 
 let stat_initial = 0
 let stat_inc_steps s = s + 1
@@ -62,10 +65,18 @@ let pushglobal f state =
   put_stack (global :: get_stack state) state
 
 let pushint n state =
-  (* allocate number on heap *)
-  let (heap', addr) = Heap.alloc (get_heap state) (NNum n) in
-  (* place addr of number onto stack, and update heap *)
-  put_heap heap' (put_stack (addr :: get_stack state) state)
+  (* optimization, treat number as globals, so can be reused *)
+  let n_str = string_of_int n in
+    try let global = List.assoc n_str (get_globals state) in
+      (* if there is a global, reuse it *)
+      put_stack (global :: get_stack state) state
+    with Not_found ->
+      (* otherwise, create and put onto the heap for reuse *)
+      let (heap', addr) = Heap.alloc (get_heap state) (NNum n) in
+      (* place addr of number onto stack, and update heap and globals *)
+      let globals' = (n_str, addr) :: get_globals state in
+      let stack' = (addr::get_stack state) in
+      put_globals globals' (put_heap heap' (put_stack stack' state))
 
 let mkap state =
   match get_stack state with
@@ -77,14 +88,14 @@ let mkap state =
 
 let push n state =
   (* pushes an argument to a function onto the stack *)
-  let get_arg = function
-    | NAp (a1, a2) -> a2
-    | _ -> failwith "getarg error, not NAp"
-  in
+  (* let get_arg = function *)
+  (*   | NAp (a1, a2) -> a2 *)
+  (*   | _ -> failwith "getarg error, not NAp" *)
+  (* in *)
   let stack = get_stack state in
-  let root = List.nth stack (n + 1) in
-  let a = get_arg (Heap.lookup (get_heap state) root) in
-  put_stack (a::stack) state
+  let an = List.nth stack n in
+  (* let a = get_arg (Heap.lookup (get_heap state) an) in *)
+  put_stack (an::stack) state
 
 let slide n state =
   match get_stack state with
@@ -92,9 +103,20 @@ let slide n state =
   | _ -> failwith "slide error"
 
 let unwind state =
+  let get_arg = function
+    | NAp (a1, a2) -> a2
+    | _ -> failwith "getarg error, not NAp"
+  in
+  (* rearranges the stack so that we put all the args directly onto the stack  *)
+  let rearrange n heap addrs =
+    let ap_addrs = List.tl addrs in
+    let addrs' = List.map (fun addr -> get_arg (Heap.lookup heap addr)) ap_addrs in
+    fst (take n addrs') @ drop n addrs
+  in
   match get_stack state with
   | l::ls ->
-    let new_state node = match node with
+    begin
+      match Heap.lookup (get_heap state) l with
       (* number at the top of the stack means evaluation is done *)
       | NNum _ -> state
       (* application, continue unwinding *)
@@ -102,10 +124,26 @@ let unwind state =
       | NGlobal (n, c) ->
         if List.length ls < n
         then failwith "unwinding with too few argus"
-        else put_code c state
-    in
-    new_state (Heap.lookup (get_heap state) l)
+        else
+          let stack' = rearrange n (get_heap state) (get_stack state) in
+          put_stack stack' (put_code c state)
+      | NInd a ->
+        put_code [Unwind] (put_stack (a::ls) state)
+    end
   | _ -> failwith "error unwinding"
+
+let update n state =
+  match get_stack state with
+  | a :: stack ->
+    let f_and_args, remains = take (n + 1) stack in
+    let an = last f_and_args in
+    let heap' = Heap.update (get_heap state) an (NInd a) in
+    put_stack stack (put_heap heap' state)
+  | _ -> failwith "error update"
+
+let pop n state =
+  let stack = drop n (get_stack state) in
+  put_stack stack state
 
 (* advance by one instruction *)
 let step (state : gm_state) : gm_state =
@@ -119,7 +157,9 @@ let step (state : gm_state) : gm_state =
    | Pushint n -> pushint n
    | Push n -> push n
    | Mkap -> mkap
-   | Slide n -> slide n
+   (* | Slide n -> slide n *)
+   | Update n -> update n
+   | Pop n -> pop n
   in
   (* dispatch on current instruction, update instruction stream to remaining instructions *)
   dispatch i (put_code is state)
@@ -164,7 +204,9 @@ let rec compile_c : gm_compiler = fun e env ->
   (* | ELam (_,_) -> (??) *)
 
 let compile_r : gm_compiler = fun e env ->
-  compile_c e env @ [Slide (List.length env + 1); Unwind]
+  (* compile_c e env @ [Slide (List.length env + 1); Unwind] *)
+  let n = List.length env in
+  compile_c e env @ [Update n; Pop n; Unwind]
 
 let compile_sc = function
   | (name, env, body) -> (name, List.length env, compile_r body (indexify env))
@@ -203,11 +245,13 @@ let show_instruction (i : instruction) = match i with
   | Pushint n -> i_append (i_str "Pushint ") (i_num n)
   | Push n -> i_append (i_str "Push ") (i_num n)
   | Mkap -> i_str "Mkap"
-  | Slide n -> i_append (i_str "Slide ") (i_num n)
+  (* | Slide n -> i_append (i_str "Slide ") (i_num n) *)
+  | Update n -> i_append (i_str "Update ") (i_num n)
+  | Pop n -> i_append (i_str "Pop ") (i_num n)
 
 let show_instructions is =
   i_concat [
-    i_str "  Code:{";
+    i_str "  Code:{"; i_newline;
     i_indent (i_interleave i_newline (List.map show_instruction is));
     i_str "}"; i_newline;
   ]
@@ -232,6 +276,7 @@ let show_node state addr (node:node) = match node with
     let gs = List.filter (fun (n, a) -> addr = a) (get_globals state) in
     let v = fst (List.hd gs) in
     i_concat [i_str "Global "; i_str v]
+  | NInd addr -> i_concat [i_str "Ind "; i_str (show_addr addr)]
 
 let show_stack_item state addr =
   i_concat [
@@ -240,7 +285,7 @@ let show_stack_item state addr =
   ]
 let show_stack state =
   i_concat [
-    i_str " Stack:[";
+    i_str "  Stack:["; i_newline;
     i_indent (i_interleave i_newline
                 (* want to show top of stack at the bottom *)
                 (List.map (show_stack_item state) (List.rev (get_stack state))));
