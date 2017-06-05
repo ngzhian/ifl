@@ -1079,7 +1079,7 @@ let show_state (stack, _, heap, _, _) =
     | NInd a -> i_append (i_str "NInd ") (show_addr a)
     | NPrim (name, prim) -> i_str ("NPrim " ^ name)
     | NData (tag, addrs) ->
-      i_concat [ i_str ("NData "); i_num tag;
+      i_concat [ i_str ("NData "); i_num tag; i_str " ";
                  i_interleave (i_str " ") (List.map show_addr addrs) ]
   in
   (* show a node, if it's an application we show the argument *)
@@ -1098,7 +1098,7 @@ let show_state (stack, _, heap, _, _) =
   (* show the heap *)
   let show_heap = wrap "Heap" (i_line_btwn show_addr_node (ti_heap_addrs heap)) in
   i_concat [ show_stack; i_newline;
-             (* show_heap; *)
+             show_heap;
              i_newline ]
 
 (* show stats from running machine *)
