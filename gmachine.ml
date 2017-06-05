@@ -9,13 +9,21 @@ type instruction =
   | Pushint of int
   | Push of int
   | Mkap
-  (* | Slide of int *)
+  | Slide of int
   | Update of int
   | Pop of int
-type gm_code = instruction list
+  | Alloc of int
+  | Eval
+  | Add | Sub | Mul | Div | Neg
+  | Eq | Ne | Lt | Le | Gt | Ge
+  | Cond of gm_code * gm_code
+and gm_code = instruction list
 
 type addr = int
 type gm_stack = addr list
+
+type gm_dump_item = gm_code * gm_stack
+type gm_dump = gm_dump_item list
 
 type node =
   | NNum of int
@@ -34,28 +42,32 @@ type gm_stats = int
 type gm_state =
     gm_code    (* current instruction stream *)
   * gm_stack   (* current stack              *)
+  * gm_dump    (* current dump               *)
   * gm_heap    (* heap of nodes              *)
   * gm_globals (* global addresses in heap   *)
   * gm_stats   (* statistics of machine      *)
 
-let get_code (i, _, _, _, _) = i
-let put_code i' (i, stack, heap, globals, stats) = (i', stack, heap, globals, stats)
+let get_code (i, _, _, _, _, _) = i
+let put_code i' (i, stack, dump, heap, globals, stats) = (i', stack, dump, heap, globals, stats)
 
-let get_stack (_, stack, _, _, _) = stack
-let put_stack stack' (i, stack, heap, globals, stats) = (i, stack', heap, globals, stats)
+let get_stack (_, stack, _, _, _, _) = stack
+let put_stack stack' (i, stack, dump, heap, globals, stats) = (i, stack', dump, heap, globals, stats)
 
-let get_heap (_, _, heap, _, _) = heap
-let put_heap heap' (i, stack, heap, globals, stats) = (i, stack, heap', globals, stats)
+let get_dump (_, _, dump, _, _, _) = dump
+let put_dump dump' (i, stack, dump, heap, globals, stats) = (i, stack, dump', heap, globals, stats)
 
-let get_globals (_, _, _, globals, _) = globals
-let put_globals globals' (i, stack, heap, globals, stats) = (i, stack, heap, globals', stats)
+let get_heap (_, _, _, heap, _, _) = heap
+let put_heap heap' (i, stack, dump, heap, globals, stats) = (i, stack, dump, heap', globals, stats)
+
+let get_globals (_, _, _, _, globals, _) = globals
+let put_globals globals' (i, stack, dump, heap, globals, stats) = (i, stack, dump, heap, globals', stats)
 
 let stat_initial = 0
 let stat_inc_steps s = s + 1
 let stat_get_steps s = s
 
-let get_stats (_, _, _, _, stats) = stats
-let put_stats stats' (i, stack, heap, globals, stats) = (i, stack, heap, globals, stats')
+let get_stats (_, _, _, _, _, stats) = stats
+let put_stats stats' (i, stack, dump, heap, globals, stats) = (i, stack, dump, heap, globals, stats')
 
 let pushglobal f state =
   (* look up global in heap *)
@@ -118,12 +130,26 @@ let unwind state =
     begin
       match Heap.lookup (get_heap state) l with
       (* number at the top of the stack means evaluation is done *)
-      | NNum _ -> state
+      | NNum _ ->
+        begin
+          match get_dump state with
+          | [] -> failwith "shouldn't reach this point"
+          | (code, stack)::dump ->
+            put_code code (put_stack (l::stack) (put_dump dump state))
+        end
       (* application, continue unwinding *)
       | NAp (a1, a2) -> put_code [Unwind] (put_stack (a1::l::ls) state)
       | NGlobal (n, c) ->
         if List.length ls < n
-        then failwith "unwinding with too few argus"
+        then
+          begin
+            match get_dump state with
+            | (i, s)::d ->
+              let ak = last ls in
+              put_code i (put_stack (ak :: s) (put_dump d state))
+            | _ -> failwith "cannot unwind global"
+          end
+          (* failwith "unwinding with too few argus" *)
         else
           let stack' = rearrange n (get_heap state) (get_stack state) in
           put_stack stack' (put_code c state)
@@ -145,6 +171,64 @@ let pop n state =
   let stack = drop n (get_stack state) in
   put_stack stack state
 
+let alloc n state =
+  let rec alloc_nodes n heap : (gm_heap * addr list) = match n with
+    | 0 -> heap, []
+    | n -> let heap', addrs = alloc_nodes (n - 1) heap in
+           let heap'', a = Heap.alloc heap' (NInd Heap.null)
+      in (heap'', a :: addrs)
+  in
+  let heap, addrs = alloc_nodes n (get_heap state) in
+  let stack' = addrs @ get_stack state in
+  put_stack stack' (put_heap heap state)
+
+let eval state : gm_state =
+  match get_stack state with
+  | a::stack ->
+    let dump = (get_code state, stack)::get_dump state in
+    put_code [Unwind] (put_stack [a] (put_dump dump state))
+  | _ -> failwith "error eval"
+
+let box_integer n state : gm_state =
+  let h', a = Heap.alloc (get_heap state) (NNum n) in
+  put_stack (a::get_stack state) (put_heap h' state)
+
+let unbox_integer addr state : int =
+  match Heap.lookup (get_heap state) addr with
+  | NNum n -> n
+  | _ -> failwith "unboxing non-int"
+
+let primitive1 box unbox op state =
+  match get_stack state with
+  | s::ss -> box (op (unbox s state)) (put_stack ss state)
+  | _ -> failwith "primitive1 error"
+
+let primitive2 box unbox op state =
+  match get_stack state with
+  | s0::s1::ss -> box (op (unbox s0 state) (unbox s1 state)) (put_stack ss state)
+  | _ -> failwith "primitive1 error"
+
+let arithmetic1 = primitive1 box_integer unbox_integer
+let arithmetic2 = primitive2 box_integer unbox_integer
+
+let box_boolean b state =
+  let b' = if b then 1 else 0 in
+  let h', a = Heap.alloc (get_heap state) (NNum b') in
+  put_stack (a::get_stack state) (put_heap h' state)
+
+let comparison =
+  primitive2 box_boolean unbox_integer
+
+let cond i1 i2 state : gm_state =
+  match get_stack state with
+  | a::s -> begin
+      match Heap.lookup (get_heap state) a with
+      | NNum 1 -> put_code (i1 @ get_code state) (put_stack s state)
+      | NNum 0 -> put_code (i2 @ get_code state) (put_stack s state)
+      | _ -> failwith "error: top of stack not num"
+    end
+  | _ -> failwith "error: no sufficient on stack"
+
 (* advance by one instruction *)
 let step (state : gm_state) : gm_state =
   let (i, is) = match get_code state with
@@ -157,9 +241,23 @@ let step (state : gm_state) : gm_state =
    | Pushint n -> pushint n
    | Push n -> push n
    | Mkap -> mkap
-   (* | Slide n -> slide n *)
+   | Slide n -> slide n
    | Update n -> update n
    | Pop n -> pop n
+   | Alloc n -> alloc n
+   | Eval -> eval
+   | Add -> arithmetic2 (+)
+   | Sub -> arithmetic2 (-)
+   | Mul -> arithmetic2 ( * )
+   | Div -> arithmetic2 (/)
+   | Neg -> arithmetic1 (fun n -> -n)
+   | Cond (i1, i2) -> cond i1 i2
+   | Eq -> comparison (=)
+   | Ne -> comparison (<>)
+   | Lt -> comparison (>)
+   | Le -> comparison (>=)
+   | Gt -> comparison (<)
+   | Ge-> comparison (<=)
   in
   (* dispatch on current instruction, update instruction stream to remaining instructions *)
   dispatch i (put_code is state)
@@ -183,13 +281,69 @@ type gm_compiled_sc = name * int * gm_code
 type gm_environment = (name * int) list
 type gm_compiler = core_expr -> gm_environment -> gm_code
 
-let compiled_primitives = []
+let compiled_primitives : gm_compiled_sc list = [
+    ("+", 2, [Push 1; Eval; Push 1; Eval; Add; Update 2; Pop 2; Unwind]);
+    ("-", 2, [Push 1; Eval; Push 1; Eval; Sub; Update 2; Pop 2; Unwind]);
+    ("*", 2, [Push 1; Eval; Push 1; Eval; Mul; Update 2; Pop 2; Unwind]);
+    ("/", 2, [Push 1; Eval; Push 1; Eval; Div; Update 2; Pop 2; Unwind]);
+    ("negate", 1, [Push 0; Eval; Neg; Update 1; Pop 1; Unwind]);
+    ("==", 2, [Push 1; Eval; Push 1; Eval; Eq; Update 2; Pop 2; Unwind]);
+    ("~=", 2, [Push 1; Eval; Push 1; Eval; Ne; Update 2; Pop 2; Unwind]);
+    ("<", 2, [Push 1; Eval; Push 1; Eval; Lt; Update 2; Pop 2; Unwind]);
+    ("<=", 2, [Push 1; Eval; Push 1; Eval; Le; Update 2; Pop 2; Unwind]);
+    (">", 2, [Push 1; Eval; Push 1; Eval; Gt; Update 2; Pop 2; Unwind]);
+    (">=", 2, [Push 1; Eval; Push 1; Eval; Ge; Update 2; Pop 2; Unwind]);
+    ("if", 3, [Push 0; Eval; Cond ([Push 1], [Push 2]); Update 3; Pop 3; Unwind]);
+]
 
 (* change stack offsets *)
-let arg_offset n env =
+let arg_offset n env : gm_environment =
   List.map (fun (v, m) -> (v, m + n)) env
 
-let rec compile_c : gm_compiler = fun e env ->
+let rec compile_let' comp defs env : gm_code = match defs with
+  | [] -> []
+  | (name, expr)::defs ->
+    comp expr env @  (compile_let' comp defs (arg_offset 1 env))
+
+let compile_args defs env : gm_environment =
+  let n = List.length defs in
+  List.mapi (fun i (name, expr) -> (name, n-i-1)) defs
+    @ arg_offset n env
+
+let compile_let compile_c compile_e defs expr env =
+  let env' = compile_args defs env in
+  compile_let' compile_c defs env @ (compile_e expr env' @ [Slide (List.length defs)])
+
+let rec compile_letrec' comp defs env : gm_code = match defs with
+  | [] -> []
+  | (name, expr)::defs ->
+    comp expr env @ [Update (List.length defs)] @ (compile_letrec' comp defs (arg_offset 1 env))
+
+let compile_letrec compile_c compile_e defs expr env =
+  let n = List.length env in
+  let env' = compile_args defs env in
+  [Alloc n] @ compile_letrec' compile_c defs env' @ compile_e expr env' @ [Slide n]
+
+let built_in_dyadic = [
+  ("+", Add); ("-", Sub); ("*", Mul); ("/", Div);
+  ("==", Eq); ("~=", Ne); (">=", Ge); (">", Gt); ("<=", Le); ("<", Lt)
+]
+
+let rec compile_e : gm_compiler = fun e env ->
+  match e with
+  | ENum n -> [Pushint n]
+  | ELet (recursive, defs, e)  ->
+    if recursive
+    then compile_letrec compile_c compile_e defs e env
+    else compile_let compile_c compile_e defs e env
+  | EAp (EAp (EVar f, e0), e1) when List.mem_assoc f built_in_dyadic ->
+    compile_e e0 env @ compile_e e1 (arg_offset 1 env) @ [List.assoc f built_in_dyadic]
+  | EAp (EVar "negate", e) -> compile_e e env @ [Neg]
+  | EAp (EAp (EAp (EVar "if", e0), e1), e2) ->
+    compile_e e0 env @ [Cond (compile_e e1 env, compile_e e2 env)]
+  | e -> compile_c e env @ [Eval]
+
+and compile_c : gm_compiler = fun e env ->
   match e with
   | EVar v ->
     if (List.mem_assoc v env)
@@ -197,16 +351,19 @@ let rec compile_c : gm_compiler = fun e env ->
     else [Pushglobal v]
   | ENum n -> [Pushint n]
   | EAp (e1, e2) -> compile_c e2 env @ (compile_c e1 (arg_offset 1 env)) @ [Mkap]
-  | _ -> failwith "HELLO"
   (* | EConstr (_,_) -> (??) *)
-  (* | ELet (_,_,_) -> (??) *)
+  | ELet (recursive, defs, e)  ->
+    if recursive
+    then compile_letrec compile_c compile_e defs e env
+    else compile_let compile_c compile_c defs e env
   (* | ECase (_,_) -> (??) *)
   (* | ELam (_,_) -> (??) *)
+  | _ -> failwith "HELLO"
 
 let compile_r : gm_compiler = fun e env ->
   (* compile_c e env @ [Slide (List.length env + 1); Unwind] *)
   let n = List.length env in
-  compile_c e env @ [Update n; Pop n; Unwind]
+  compile_e e env @ [Update n; Pop n; Unwind]
 
 let compile_sc = function
   | (name, env, body) -> (name, List.length env, compile_r body (indexify env))
@@ -231,13 +388,13 @@ let prelude_defs : core_program =
 
 let compile program =
   let build_initial_heap program =
-    let compiled = List.map compile_sc (prelude_defs @ program @ compiled_primitives) in
+    let compiled = List.map compile_sc (prelude_defs @ program) @ compiled_primitives in
     map_accuml allocate_sc Heap.init compiled
   in
   let (heap, globals) = build_initial_heap program in
   (* entry point is main *)
-  let initial_code = [Pushglobal main_entry; Unwind] in
-  (initial_code, [], heap, globals, stat_initial)
+  let initial_code = [Pushglobal main_entry; Eval] in
+  (initial_code, [], [], heap, globals, stat_initial)
 
 let show_instruction (i : instruction) = match i with
   | Unwind -> i_str "Unwind"
@@ -245,9 +402,25 @@ let show_instruction (i : instruction) = match i with
   | Pushint n -> i_append (i_str "Pushint ") (i_num n)
   | Push n -> i_append (i_str "Push ") (i_num n)
   | Mkap -> i_str "Mkap"
-  (* | Slide n -> i_append (i_str "Slide ") (i_num n) *)
+  | Slide n -> i_append (i_str "Slide ") (i_num n)
   | Update n -> i_append (i_str "Update ") (i_num n)
   | Pop n -> i_append (i_str "Pop ") (i_num n)
+  | Alloc n -> i_append (i_str "Alloc ") (i_num n)
+  | Eval -> i_str "Eval"
+  | Add -> i_str "Add"
+  | Sub -> i_str "Sub"
+  | Mul -> i_str "Mul"
+  | Div -> i_str "Div"
+  | Neg -> i_str "Neg"
+  | Cond (i1, i2) -> i_concat [
+      i_str "Cond"
+    ]
+  | Eq -> i_str "Eq"
+  | Ne -> i_str "Ne"
+  | Lt -> i_str "Lt"
+  | Le -> i_str "Le"
+  | Gt -> i_str "Gt"
+  | Ge -> i_str "Ge"
 
 let show_instructions is =
   i_concat [
@@ -291,9 +464,34 @@ let show_stack state =
                 (List.map (show_stack_item state) (List.rev (get_stack state))));
     i_str "]"
   ]
+let show_short_instructions number code =
+  let codes = List.map show_instruction (fst (take number code)) in
+  let dotcodes = if List.length code > number
+    then codes @ [i_str "..."]
+    else codes
+  in
+  i_concat [ i_str "{"; i_interleave (i_str "; ") dotcodes; i_str "}"]
+let show_short_stack stack =
+  i_concat [ i_str "[";
+             i_interleave (i_str ", ") (List.map (fun addr -> i_str (show_addr addr)) stack);
+             i_str "]"
+           ]
+let show_dump_item (code, stack) =
+  i_concat [ i_str "<";
+             show_short_instructions 3 code; i_str ", ";
+             show_short_stack stack; i_str ">" ]
+let show_dump (state:gm_state) =
+  i_concat [
+    i_str "  Dump:["; i_newline;
+    i_indent (i_interleave i_newline
+                (* want to show top of stack at the bottom *)
+                (List.map show_dump_item (List.rev (get_dump state))));
+    i_str "]"
+  ]
 let show_state state =
   i_concat [
     show_stack state; i_newline;
+    show_dump state; i_newline;
     show_instructions (get_code state); i_newline;
   ]
 let show_stats state =
@@ -318,4 +516,3 @@ let show_results states =
 (* run a Core program in string form *)
 let run_prog_string s =
   s |> parse_string |> compile |> eval |> show_results
-

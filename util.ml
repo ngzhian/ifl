@@ -14,6 +14,7 @@ struct
     List.nth heap addr
   let size heap =
     List.length heap
+  let null = -1
 end
 
 (** Some helper functions for working with Lists *)
