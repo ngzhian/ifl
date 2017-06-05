@@ -2,28 +2,7 @@ open Ast
 open Pprint
 open Lexer
 open Parser
-
-let syntax (tokens : token list) : core_program =
-  let rec take_first_parse = function
-    | (prog, []) :: others -> prog
-    | parse :: others -> take_first_parse others
-    | _ -> failwith "Syntax error"
-  in
-  take_first_parse (p_program tokens)
-
-let load_file f =
-  let ic = open_in f in
-  let n = in_channel_length ic in
-  let s = Bytes.create n in
-  really_input ic s 0 n;
-  close_in ic;
-  (s)
-
-let parse_string s : core_program =
-  syntax (clex s)
-
-let parse filename : core_program =
-  syntax (clex (load_file filename))
+open Util
 
 (* Template instantiation machine *)
 
@@ -63,21 +42,26 @@ and ti_stats = int (* number of steps *)
              * int (* max stack depth *)
 
 (* Heap operations *)
-let ti_heap_initial = [], 0
+let ti_heap_initial = Heap.init
 (* allocate a node onto the heap by adding to the end *)
 (* TODO slow but simple *)
-let ti_heap_alloc ((heap, n_alloc) : ti_heap) (node : node) =
-  ((heap @ [node], n_alloc + 1), List.length heap)
+let ti_heap_alloc = Heap.alloc
+(* let ti_heap_alloc ((heap, n_alloc) : ti_heap) (node : node) = *)
+(*   ((heap @ [node], n_alloc + 1), List.length heap) *)
 (* copy a node from addr m to addr n *)
-let ti_heap_copy ((heap, n_alloc)) m n : ti_heap =
-  (List.mapi (fun i a -> if i = n then List.nth heap m else a) heap, n_alloc)
+let ti_heap_copy = Heap.copy
+(* let ti_heap_copy ((heap, n_alloc)) m n : ti_heap = *)
+(*   (List.mapi (fun i a -> if i = n then List.nth heap m else a) heap, n_alloc) *)
 (* update a node from at addr m to node *)
-let ti_heap_update ((heap, n_alloc)) m node : ti_heap =
-  (List.mapi (fun i a -> if i = m then node else a) heap, n_alloc)
-let ti_heap_lookup ((heap, n_alloc) : ti_heap) (addr : addr) =
-  List.nth heap addr
-let ti_heap_size heap =
-  List.length heap
+let ti_heap_update  = Heap.update
+(* let ti_heap_update ((heap, n_alloc)) m node : ti_heap = *)
+(*   (List.mapi (fun i a -> if i = m then node else a) heap, n_alloc) *)
+let ti_heap_lookup  = Heap.lookup
+(* let ti_heap_lookup ((heap, n_alloc) : ti_heap) (addr : addr) = *)
+(*   List.nth heap addr *)
+let ti_heap_size  = Heap.size
+(* let ti_heap_size heap = *)
+  (* List.length heap *)
 (* get all addresses on heap *)
 let ti_heap_addrs ((heap, n_alloc) : ti_heap) : addr list =
   (* since heap is a list, we want to return a list of addr from 0 to length -1 *)
@@ -96,20 +80,6 @@ let ti_stat_depth (s, p, c, d) d' = (s, p, c, max d d')
 let ti_stat_get s = s
 let apply_to_stats fn (s, d, h, f, stats) =
   (s, d, h, f, fn stats)
-
-(* Maps a list by calling f on the acc and elements of the list
- * returning the final acc and the input list transformed by f *)
-let rec map_accuml f acc xs = match xs with
-  | []      -> (acc, [])
-  | x :: xs -> let (acc1, y) = f acc x in
-               let (acc2, ys) = map_accuml f acc1 xs in
-               (acc2, y :: ys)
-  (* possibly a faster impl *)
-  (* let rec go acc xs ys = match xs with *)
-  (*   | [] -> acc, ys *)
-  (*   | x::xs -> let (acc', y) = f acc x in go acc' xs (y::ys) in *)
-  (* let (acc, ys) = go acc xs [] in *)
-  (* (acc, List.rev ys) *)
 
 (* Allocates a supercombinator definition on the heap *)
 let allocate_sc heap (name, args, body) =
@@ -261,15 +231,6 @@ and instantiate_letrec_and_update defs body upd_addr heap env =
   let (heap', env') = map_accuml alloc heap' defs in
   instantiate_and_update body upd_addr heap' (env' @ env)
 
-
-(* get the last element of ls *)
-let last ls = List.nth ls (List.length ls - 1)
-
-(* take n elements from ls, returning 2 lists *)
-let rec take n ls = match (n, ls) with
-  | 0, ls    -> [], ls
-  | n, l::ls -> let (xs, ys) = take (n - 1) ls in l :: xs, ys
-  | _, []    -> [], []
 
 (* a number should never be applied as a function *)
 let num_step (stack, dump, heap, globals, stats) n =

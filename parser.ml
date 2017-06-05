@@ -236,3 +236,25 @@ let p_sc : core_sc_defn parser =
 let p_program : core_program parser =
   p_one_or_more_with_sep p_sc (p_lit ";")
 
+
+let syntax (tokens : token list) : core_program =
+  let rec take_first_parse = function
+    | (prog, []) :: others -> prog
+    | parse :: others -> take_first_parse others
+    | _ -> failwith "Syntax error"
+  in
+  take_first_parse (p_program tokens)
+
+let load_file f =
+  let ic = open_in f in
+  let n = in_channel_length ic in
+  let s = Bytes.create n in
+  really_input ic s 0 n;
+  close_in ic;
+  (s)
+
+let parse_string s : core_program =
+  syntax (clex s)
+
+let parse filename : core_program =
+  syntax (clex (load_file filename))
