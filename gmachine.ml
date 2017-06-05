@@ -17,6 +17,10 @@ type instruction =
   | Add | Sub | Mul | Div | Neg
   | Eq | Ne | Lt | Le | Gt | Ge
   | Cond of gm_code * gm_code
+  | Pack of int * int
+  | Casejump of (int * gm_code) list
+  | Split of int
+  | Print
 and gm_code = instruction list
 
 type addr = int
@@ -410,7 +414,7 @@ let compile program : gm_state =
   let initial_code = [Pushglobal main_entry; Eval] in
   ("", initial_code, [], [], heap, globals, stat_initial)
 
-let show_instruction (i : instruction) = match i with
+let rec show_instruction (i : instruction) = match i with
   | Unwind -> i_str "Unwind"
   | Pushglobal f -> i_append (i_str "Pushglobal ") (i_str f)
   | Pushint n -> i_append (i_str "Pushint ") (i_num n)
@@ -435,8 +439,17 @@ let show_instruction (i : instruction) = match i with
   | Le -> i_str "Le"
   | Gt -> i_str "Gt"
   | Ge -> i_str "Ge"
+  | Pack (tag, arity) -> i_concat [
+      i_str "Pack{" ; i_num tag; i_str ","; i_num arity; i_str "}"; ]
+  | Casejump alts ->
+    let print_alt (tag, code) =
+      i_concat [ i_num tag; i_str " -> "; i_indent (show_instructions code); ] in
+    i_interleave (i_str " ; ") (List.map print_alt alts)
+    (* of (int * gm_code) list *)
+  | Split n -> i_append (i_str "Split ") (i_num n)
+  | Print -> i_str "Print"
 
-let show_instructions is =
+and show_instructions is =
   i_concat [
     i_str "  Code:{"; i_newline;
     i_indent (i_interleave i_newline (List.map show_instruction is));
