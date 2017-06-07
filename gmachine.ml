@@ -148,7 +148,7 @@ let unwind state =
     begin
       match Heap.lookup (get_heap state) l with
       (* number at the top of the stack means evaluation is done *)
-      | NNum _ ->
+      | NNum _ | NConstr _ ->
         begin
           match get_dump state with
           | [] -> failwith "shouldn't reach this point"
@@ -230,8 +230,8 @@ let arithmetic1 = primitive1 box_integer unbox_integer
 let arithmetic2 = primitive2 box_integer unbox_integer
 
 let box_boolean b state =
-  let b' = if b then 1 else 0 in
-  let h', a = Heap.alloc (get_heap state) (NNum b') in
+  let b' = if b then 2 (* true *) else 1 (* false *) in
+  let h', a = Heap.alloc (get_heap state) (NConstr (b', [])) in
   put_stack (a::get_stack state) (put_heap h' state)
 
 let comparison =
@@ -246,6 +246,49 @@ let cond i1 i2 state : gm_state =
       | _ -> failwith "error: top of stack not num"
     end
   | _ -> failwith "error: no sufficient on stack"
+
+let pack tag arity state : gm_state =
+  let args, rem = take arity (get_stack state) in
+  let node = NConstr (tag, args) in
+  let heap', addr = Heap.alloc (get_heap state) node in
+  put_stack (addr :: rem) (put_heap heap' state)
+
+let casejump alts state : gm_state =
+  match get_stack state with
+  | a::s -> begin
+      match Heap.lookup (get_heap state) a with
+      | NConstr (t, ss) ->
+        let i' = List.assoc t alts in
+        let code' = i' @ (get_code state) in
+        put_code code' state
+      | _ -> failwith "casejump stack top not in WHNF"
+    end
+  | _ -> failwith "error: no sufficient on stack"
+
+let split n state : gm_state =
+  match get_stack state with
+  | a::s -> begin
+      match Heap.lookup (get_heap state) a with
+      | NConstr (t, ss) ->
+        let stack' = ss @ s in
+        put_stack stack' state
+      | _ -> failwith "split stack top not in WHNF"
+    end
+  | _ -> failwith "error: no sufficient on stack"
+
+let print state : gm_state =
+  match get_stack state with
+  | a::s -> begin
+      match Heap.lookup (get_heap state) a with
+      | NNum n ->
+        put_stack s (put_output ((get_output state) ^ (string_of_int n)) state)
+      | NConstr (t, ss) ->
+        let code' = List.fold_left (fun a b -> Eval::Print::a) [] ss in
+        put_code code' (put_stack (ss @ s) state)
+      | _ -> failwith "error: cannot print"
+    end
+  | _ -> failwith "error: no sufficient on stack"
+
 
 (* advance by one instruction *)
 let step (state : gm_state) : gm_state =
@@ -275,7 +318,11 @@ let step (state : gm_state) : gm_state =
    | Lt -> comparison (>)
    | Le -> comparison (>=)
    | Gt -> comparison (<)
-   | Ge-> comparison (<=)
+   | Ge -> comparison (<=)
+   | Pack (t, n) -> pack t n
+   | Casejump alts -> casejump alts
+   | Split n -> split n
+   | Print -> fun x -> x
   in
   (* dispatch on current instruction, update instruction stream to remaining instructions *)
   dispatch i (put_code is state)
@@ -311,12 +358,18 @@ let compiled_primitives : gm_compiled_sc list = [
     ("<=", 2, [Push 1; Eval; Push 1; Eval; Le; Update 2; Pop 2; Unwind]);
     (">", 2, [Push 1; Eval; Push 1; Eval; Gt; Update 2; Pop 2; Unwind]);
     (">=", 2, [Push 1; Eval; Push 1; Eval; Ge; Update 2; Pop 2; Unwind]);
-    ("if", 3, [Push 0; Eval; Cond ([Push 1], [Push 2]); Update 3; Pop 3; Unwind]);
+    (* ("if", 3, [Push 0; Eval; Cond ([Push 1], [Push 2]); Update 3; Pop 3; Unwind]); *)
 ]
 
 (* change stack offsets *)
 let arg_offset n env : gm_environment =
   List.map (fun (v, m) -> (v, m + n)) env
+
+(* d scheme *)
+let compile_alts (comp : int -> gm_compiler) alts env =
+  let c (tag, names, body) =
+    (tag, comp (List.length names) body (indexify names @ arg_offset (List.length names) env)) in
+  List.map c alts
 
 let rec compile_let' comp defs env : gm_code = match defs with
   | [] -> []
@@ -357,9 +410,14 @@ let rec compile_e : gm_compiler = fun e env ->
   | EAp (EAp (EVar f, e0), e1) when List.mem_assoc f built_in_dyadic ->
     compile_e e0 env @ compile_e e1 (arg_offset 1 env) @ [List.assoc f built_in_dyadic]
   | EAp (EVar "negate", e) -> compile_e e env @ [Neg]
-  | EAp (EAp (EAp (EVar "if", e0), e1), e2) ->
-    compile_e e0 env @ [Cond (compile_e e1 env, compile_e e2 env)]
+  (* | EAp (EAp (EAp (EVar "if", e0), e1), e2) -> *)
+  (*   compile_e e0 env @ [Cond (compile_e e1 env, compile_e e2 env)] *)
+  | ECase (expr, alts) -> compile_e expr env @ [Casejump (compile_alts compile_e' alts env)]
+  | EConstr (tag, arity) -> [Pack (tag, arity)]
   | e -> compile_c e env @ [Eval]
+
+and compile_e' offset : gm_compiler = fun e env ->
+  [Split offset] @ compile_e e env @ [Slide offset]
 
 and compile_c : gm_compiler = fun e env ->
   match e with
@@ -369,7 +427,7 @@ and compile_c : gm_compiler = fun e env ->
     else [Pushglobal v]
   | ENum n -> [Pushint n]
   | EAp (e1, e2) -> compile_c e2 env @ (compile_c e1 (arg_offset 1 env)) @ [Mkap]
-  (* | EConstr (_,_) -> (??) *)
+  | EConstr (tag, arity) -> [Pack (tag, arity)]
   | ELet (recursive, defs, e)  ->
     if recursive
     then compile_letrec compile_c compile_e defs e env
@@ -402,6 +460,8 @@ let prelude_defs : core_program =
                                       EAp (EVar "g", EVar "x")));
     ("twice",   ["f"], EAp (EAp (EVar "compose", EVar "f"),
                             EVar "f"));
+
+    ("if", ["c"; "t"; "f"], ECase (EVar "c", [(1, [], EVar "f"); (2, [], EVar "t")]))
   ]
 
 let compile program : gm_state =
@@ -411,7 +471,7 @@ let compile program : gm_state =
   in
   let (heap, globals) = build_initial_heap program in
   (* entry point is main *)
-  let initial_code = [Pushglobal main_entry; Eval] in
+  let initial_code = [Pushglobal main_entry; Eval; Print] in
   ("", initial_code, [], [], heap, globals, stat_initial)
 
 let rec show_instruction (i : instruction) = match i with
