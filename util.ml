@@ -43,5 +43,5 @@ let rec map_accuml f acc xs = match xs with
   (* let (acc, ys) = go acc xs [] in *)
   (* (acc, List.rev ys) *)
 
-(* Create an assoc list with the in the second position *)
+(* Create an assoc list with the index in the second position *)
 let indexify xs = List.mapi (fun i a -> (a, i)) xs
